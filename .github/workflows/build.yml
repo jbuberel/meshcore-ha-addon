@@ -1,0 +1,125 @@
+name: Build and Publish Add-on
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+env:
+  ADDON_SLUG: meshcore_test_bot
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/meshcore-ha-addon
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        arch:
+          - aarch64
+          - amd64
+          - armhf
+          - armv7
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read add-on version
+        id: addon_version
+        run: |
+          VERSION=$(grep '^version:' ${{ env.ADDON_SLUG }}/config.yaml | awk '{print $2}' | tr -d '"')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract build base image
+        id: build_from
+        run: |
+          BUILD_FROM=$(grep -A1 'build_from:' ${{ env.ADDON_SLUG }}/build.yaml \
+            | grep '${{ matrix.arch }}' \
+            | awk '{print $2}' | tr -d '"')
+          echo "image=${BUILD_FROM}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Docker platform for arch
+        id: platform
+        run: |
+          case "${{ matrix.arch }}" in
+            amd64)   echo "platform=linux/amd64"   >> "$GITHUB_OUTPUT" ;;
+            aarch64) echo "platform=linux/arm64"   >> "$GITHUB_OUTPUT" ;;
+            armv7)   echo "platform=linux/arm/v7"  >> "$GITHUB_OUTPUT" ;;
+            armhf)   echo "platform=linux/arm/v6"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ env.ADDON_SLUG }}
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            BUILD_FROM=${{ steps.build_from.outputs.image }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.arch }}-${{ env.ADDON_SLUG }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.arch }}-${{ env.ADDON_SLUG }}:${{ steps.addon_version.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.title=MeshCore Test Bot (${{ matrix.arch }})
+            org.opencontainers.image.version=${{ steps.addon_version.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read add-on version
+        id: addon_version
+        run: |
+          VERSION=$(grep '^version:' ${{ env.ADDON_SLUG }}/config.yaml | awk '{print $2}' | tr -d '"')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.addon_version.outputs.version }}"
+          body: |
+            ## MeshCore Test Bot ${{ steps.addon_version.outputs.version }}
+
+            Docker images published to GHCR for: `amd64`, `aarch64`, `armv7`, `armhf`
+
+            ### Installation
+            Add this repository to Home Assistant:
+            `https://github.com/${{ github.repository }}`
+          generate_release_notes: true

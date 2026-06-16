@@ -1,0 +1,138 @@
+import asyncio
+import logging
+import os
+from typing import Any
+
+from meshcore import MeshCore, EventType
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+_LOGGER = logging.getLogger("meshcore_test_bot")
+
+SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
+BAUDRATE = int(os.environ.get("BAUDRATE", "115200"))
+CHANNEL_IDX = int(os.environ.get("CHANNEL_IDX", "1"))
+TRIGGER_TEXT = os.environ.get("TRIGGER_TEXT", "test").lower()
+DEVICE_NAME_OVERRIDE = os.environ.get("DEVICE_NAME", "")
+
+latest_hop_count: int | None = None
+
+
+def parse_rx_log_data(payload: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    try:
+        hex_str = None
+        if isinstance(payload, dict):
+            hex_str = payload.get("payload") or payload.get("raw_hex")
+        elif isinstance(payload, (str, bytes)):
+            hex_str = payload
+
+        if not hex_str:
+            return result
+
+        if isinstance(hex_str, bytes):
+            hex_str = hex_str.hex()
+
+        hex_str = str(hex_str).lower().replace(" ", "").replace("\n", "").replace("\r", "")
+
+        if len(hex_str) < 4:
+            return result
+
+        result["header"] = hex_str[0:2]
+        try:
+            path_len = int(hex_str[2:4], 16)
+            result["path_len"] = path_len
+        except ValueError:
+            return {}
+
+    except Exception as ex:
+        _LOGGER.debug("Error parsing RX_LOG data: %s", ex)
+
+    return result
+
+
+async def main():
+    global latest_hop_count
+
+    _LOGGER.info("Connecting to MeshCore device on %s at %d baud", SERIAL_PORT, BAUDRATE)
+    mc = await MeshCore.create_serial(SERIAL_PORT, BAUDRATE)
+    _LOGGER.info("Connected")
+
+    device_name = DEVICE_NAME_OVERRIDE
+    if not device_name:
+        info = mc.self_info or {}
+        # self_info is a dict; common field names observed in meshcore firmware
+        device_name = (
+            info.get("adv_name")
+            or info.get("name")
+            or info.get("node_name")
+            or "MeshCore"
+        )
+    _LOGGER.info("Device name: %s", device_name)
+
+    await mc.start_auto_message_fetching()
+
+    async def handle_rx_log(event):
+        global latest_hop_count
+        rx = event.payload or {}
+        raw = rx.get("payload")
+        if not raw:
+            return
+        parsed = parse_rx_log_data(raw)
+        hop_count = parsed.get("path_len")
+        if hop_count is not None:
+            latest_hop_count = hop_count
+            _LOGGER.debug("Updated hop count: %d", hop_count)
+
+    async def handle_channel_message(event):
+        msg = event.payload or {}
+        text = msg.get("text", "")
+        chan = msg.get("channel_idx")
+
+        # Extract sender: meshcore channel messages are formatted as "sender: text"
+        if ":" in text:
+            sender = text.split(":", 1)[0].strip()
+        else:
+            sender = "unknown"
+
+        _LOGGER.info("Channel %s | %s: %s", chan, sender, text)
+
+        if TRIGGER_TEXT not in text.lower():
+            return
+
+        hops = latest_hop_count if latest_hop_count is not None else 0
+        reply = f"@{sender}: {hops} hops from {device_name}"
+        _LOGGER.info("Sending reply: %s", reply)
+
+        result = await mc.commands.send_chan_msg(CHANNEL_IDX, reply)
+        if result.type == EventType.ERROR:
+            _LOGGER.error("Failed to send reply: %s", result.payload)
+        else:
+            _LOGGER.info("Reply sent successfully")
+
+    mc.subscribe(
+        EventType.CHANNEL_MSG_RECV,
+        handle_channel_message,
+        attribute_filters={"channel_idx": CHANNEL_IDX},
+    )
+    mc.subscribe(EventType.RX_LOG_DATA, handle_rx_log)
+
+    _LOGGER.info(
+        "Listening on channel %d for messages containing '%s'", CHANNEL_IDX, TRIGGER_TEXT
+    )
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _LOGGER.info("Shutting down")
+    finally:
+        await mc.stop_auto_message_fetching()
+        await mc.disconnect()
+        _LOGGER.info("Disconnected")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
