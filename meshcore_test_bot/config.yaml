@@ -2,7 +2,7 @@ name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
 version: "1.0.0"
 slug: "meshcore_test_bot"
-url: "https://github.com/jasonbuberel/meshcore-ha-addon"
+url: "https://github.com/jbuberel/meshcore-ha-addon"
 
 arch:
   - aarch64
@@ -14,7 +14,7 @@ startup: application
 boot: auto
 init: false
 
-image: "ghcr.io/jasonbuberel/meshcore-ha-addon/{arch}-meshcore-test-bot"
+image: "ghcr.io/jbuberel/meshcore-ha-addon/{arch}-meshcore-test-bot"
 
 options:
   serial_port: "/dev/ttyUSB0"

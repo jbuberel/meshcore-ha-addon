@@ -7,5 +7,5 @@ build_from:
 labels:
   org.opencontainers.image.title: "MeshCore Test Bot"
   org.opencontainers.image.description: "Home Assistant add-on that monitors MeshCore for test messages and auto-replies."
-  org.opencontainers.image.source: "https://github.com/jasonbuberel/meshcore-ha-addon"
+  org.opencontainers.image.source: "https://github.com/jbuberel/meshcore-ha-addon"
   org.opencontainers.image.licenses: "MIT"

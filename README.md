@@ -12,7 +12,7 @@ A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) devic
 2. Click the three-dot menu (⋮) in the top-right and choose **Repositories**.
 3. Add this URL:
    ```
-   https://github.com/jasonbuberel/meshcore-ha-addon
+   https://github.com/jbuberel/meshcore-ha-addon
    ```
 4. Find **MeshCore Test Bot** in the store and click **Install**.
 
