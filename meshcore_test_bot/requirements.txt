@@ -1,1 +1,1 @@
-meshcore_py
+meshcore>=2.3.7
