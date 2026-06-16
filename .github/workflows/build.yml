@@ -58,8 +58,7 @@ jobs:
       - name: Extract build base image
         id: build_from
         run: |
-          BUILD_FROM=$(grep -A1 'build_from:' ${{ env.ADDON_SLUG }}/build.yaml \
-            | grep '${{ matrix.arch }}' \
+          BUILD_FROM=$(grep '^\s*${{ matrix.arch }}:' ${{ env.ADDON_SLUG }}/build.yaml \
             | awk '{print $2}' | tr -d '"')
           echo "image=${BUILD_FROM}" >> "$GITHUB_OUTPUT"
 
