@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.0.2"
+version: "1.0.3"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -17,7 +17,7 @@ init: false
 image: "ghcr.io/jbuberel/meshcore-ha-addon/{arch}-meshcore_test_bot"
 
 options:
-  serial_port: "/dev/ttyUSB0"
+  serial_port: "/dev/serial/by-id/usb-RAKwireless_WisCore_RAK4631_Board_A6055CC4E20C32E2-if00"
   baudrate: 115200
   channel_idx: 1
   trigger_text: "test"
@@ -30,8 +30,14 @@ schema:
   trigger_text: str
   device_name: str
 
+# uart: true auto-discovers serial/UART devices and grants the container the
+# correct cgroup device permissions (fixes "Operation not permitted" / EPERM).
+uart: true
+
+# Explicitly map the device as well, so the cgroup allow-rule is created even
+# if auto-discovery misses it.
 devices:
-  - "/dev/ttyUSB0"
+  - "/dev/ttyACM0"
 
 map:
   - config:rw

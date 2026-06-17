@@ -20,7 +20,7 @@ A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) devic
 
 | Option | Default | Description |
 |---|---|---|
-| `serial_port` | `/dev/ttyUSB0` | Serial device path for the MeshCore USB connection |
+| `serial_port` | `/dev/serial/by-id/usb-RAKwireless_...-if00` | Serial device path. The stable `/dev/serial/by-id/...` path is recommended over `/dev/ttyACMx`, which can renumber across reboots. |
 | `baudrate` | `115200` | Serial baud rate |
 | `channel_idx` | `1` | Channel index to monitor (0-based; find yours in the MeshCore app) |
 | `trigger_text` | `test` | Text to match in incoming messages (case-insensitive) |
@@ -29,7 +29,7 @@ A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) devic
 Example `options` in the add-on UI:
 
 ```yaml
-serial_port: /dev/ttyUSB0
+serial_port: /dev/serial/by-id/usb-RAKwireless_WisCore_RAK4631_Board_XXXX-if00
 baudrate: 115200
 channel_idx: 1
 trigger_text: test
@@ -42,9 +42,15 @@ The `channel_idx` is zero-based and matches the order channels appear in the Mes
 
 ## USB serial device access
 
-The add-on requests access to `/dev/ttyUSB0` by default. If your device appears at a different path (e.g. `/dev/ttyACM0`), update `serial_port` in the add-on config and restart.
+The add-on uses the `uart: true` flag, which grants the container the correct
+cgroup device permissions for serial/UART hardware. Without it (or without the
+device mapped under `devices:`), opening the port fails with
+`Operation not permitted` (EPERM) even though the device node is visible.
 
-To verify the device path in HA, check **Settings → System → Hardware** or use the SSH add-on to run `ls /dev/tty*`.
+To find your device's stable path in HA, go to **Settings → System → Hardware →
+(⋮) All Hardware** and look for your MeshCore board (e.g.
+`RAKwireless_WisCore_RAK4631`). Use its `/dev/serial/by-id/...` path as
+`serial_port` — it survives reboots and replugs, unlike `/dev/ttyACMx`.
 
 ## Development
 
