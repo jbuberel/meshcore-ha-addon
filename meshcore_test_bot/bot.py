@@ -152,19 +152,24 @@ async def main():
         text = msg.get("text", "")
         chan = msg.get("channel_idx")
 
-        # Extract sender: meshcore channel messages are formatted as "sender: text"
+        # Extract sender and body: meshcore channel messages are formatted
+        # as "sender: text".
         if ":" in text:
-            sender = text.split(":", 1)[0].strip()
+            sender, body = text.split(":", 1)
+            sender, body = sender.strip(), body.strip()
         else:
-            sender = "unknown"
+            sender, body = "unknown", text.strip()
 
         _LOGGER.info("Channel %s | %s: %s", chan, sender, text)
 
-        if TRIGGER_TEXT not in text.lower():
+        # Only respond when the message body starts with the trigger text
+        # (case-insensitive). Matching the body — not the full "sender: text"
+        # string — avoids false replies from sender names or mid-message hits.
+        if not body.lower().startswith(TRIGGER_TEXT):
             return
 
         hops = latest_hop_count if latest_hop_count is not None else 0
-        reply = f"@{sender}: {hops} hops from {device_name}"
+        reply = f"@[{sender}] {hops} hops to {device_name}"
         _LOGGER.info("Sending reply: %s", reply)
 
         result = await mc.commands.send_chan_msg(channel_idx, reply)
