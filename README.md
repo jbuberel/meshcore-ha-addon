@@ -22,7 +22,8 @@ A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) devic
 |---|---|---|
 | `serial_port` | `/dev/serial/by-id/usb-RAKwireless_...-if00` | Serial device path. The stable `/dev/serial/by-id/...` path is recommended over `/dev/ttyACMx`, which can renumber across reboots. |
 | `baudrate` | `115200` | Serial baud rate |
-| `channel_idx` | `1` | Channel index to monitor (0-based; find yours in the MeshCore app) |
+| `channel_name` | `#test` | Channel name to monitor. The add-on queries the device at startup and uses the matching channel's index automatically. If no channel with this name is found, the add-on logs the channels it did find and exits. Leave empty to use `channel_idx` instead. |
+| `channel_idx` | `1` | Channel index (0-based), used only when `channel_name` is empty. |
 | `trigger_text` | `test` | Text to match in incoming messages (case-insensitive) |
 | `device_name` | *(empty)* | Override the device name used in replies. If empty, auto-detected from device. |
 
@@ -31,14 +32,26 @@ Example `options` in the add-on UI:
 ```yaml
 serial_port: /dev/serial/by-id/usb-RAKwireless_WisCore_RAK4631_Board_XXXX-if00
 baudrate: 115200
+channel_name: "#test"
 channel_idx: 1
 trigger_text: test
 device_name: ""
 ```
 
-## Finding your channel index
+## Channel selection
 
-The `channel_idx` is zero-based and matches the order channels appear in the MeshCore app. Channel `#test` is typically index `1` if it's the second channel listed.
+By default the add-on resolves the channel by **name**: at startup it queries the
+device for its channels and uses the index of the channel named `channel_name`
+(default `#test`). This means you no longer need to know the numeric index — just
+the channel name as it appears on the device.
+
+If no channel with that name is found on the device, the add-on logs an error
+listing every channel name it found and exits, so you can correct the
+`channel_name` value.
+
+If `channel_name` is left empty, the add-on instead uses the static
+`channel_idx` (zero-based, matching the order channels appear in the MeshCore
+app).
 
 ## USB serial device access
 

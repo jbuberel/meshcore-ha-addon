@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 from typing import Any
 
 from meshcore import MeshCore, EventType
@@ -14,8 +15,13 @@ _LOGGER = logging.getLogger("meshcore_test_bot")
 SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
 BAUDRATE = int(os.environ.get("BAUDRATE", "115200"))
 CHANNEL_IDX = int(os.environ.get("CHANNEL_IDX", "1"))
+CHANNEL_NAME = os.environ.get("CHANNEL_NAME", "#test").strip()
 TRIGGER_TEXT = os.environ.get("TRIGGER_TEXT", "test").lower()
 DEVICE_NAME_OVERRIDE = os.environ.get("DEVICE_NAME", "")
+
+# Fallback upper bound for the channel scan when the firmware does not report
+# max_channels in its device info.
+DEFAULT_MAX_CHANNELS = 32
 
 latest_hop_count: int | None = None
 
@@ -53,6 +59,50 @@ def parse_rx_log_data(payload: Any) -> dict[str, Any]:
     return result
 
 
+async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
+    """Find the index of the channel named ``name`` by querying the device.
+
+    MeshCore has no "list channels" command, so we walk the channel slots and
+    read each one's name via ``get_channel``. Returns the matching index, or
+    ``None`` if no channel with that name exists, after logging an error that
+    lists every channel name that was found.
+    """
+    target = name.strip().lower()
+    info = mc.self_info or {}
+    max_channels = info.get("max_channels") or DEFAULT_MAX_CHANNELS
+
+    found: list[tuple[int, str]] = []
+
+    _LOGGER.info("Scanning up to %d channel(s) for '%s'", max_channels, name)
+    for idx in range(max_channels):
+        result = await mc.commands.get_channel(idx)
+        if result.type == EventType.ERROR:
+            # Unused/unsupported slot — skip it.
+            continue
+
+        payload = result.payload or {}
+        chan_name = (payload.get("channel_name") or "").strip()
+        if not chan_name:
+            continue
+
+        _LOGGER.debug("Channel %d: %s", idx, chan_name)
+        found.append((idx, chan_name))
+        if chan_name.lower() == target:
+            _LOGGER.info("Found channel '%s' at index %d", chan_name, idx)
+            return idx
+
+    if found:
+        channel_list = ", ".join(f"[{idx}] {chan_name}" for idx, chan_name in found)
+    else:
+        channel_list = "(none)"
+    _LOGGER.error(
+        "No channel named '%s' found on the device. Channels found: %s",
+        name,
+        channel_list,
+    )
+    return None
+
+
 async def main():
     global latest_hop_count
 
@@ -71,6 +121,17 @@ async def main():
             or "MeshCore"
         )
     _LOGGER.info("Device name: %s", device_name)
+
+    # Resolve the channel by name when configured; otherwise use the static index.
+    if CHANNEL_NAME:
+        channel_idx = await resolve_channel_index(mc, CHANNEL_NAME)
+        if channel_idx is None:
+            # Named channel not found — shut down cleanly and exit with an error.
+            await mc.disconnect()
+            _LOGGER.info("Disconnected")
+            sys.exit(1)
+    else:
+        channel_idx = CHANNEL_IDX
 
     await mc.start_auto_message_fetching()
 
@@ -106,7 +167,7 @@ async def main():
         reply = f"@{sender}: {hops} hops from {device_name}"
         _LOGGER.info("Sending reply: %s", reply)
 
-        result = await mc.commands.send_chan_msg(CHANNEL_IDX, reply)
+        result = await mc.commands.send_chan_msg(channel_idx, reply)
         if result.type == EventType.ERROR:
             _LOGGER.error("Failed to send reply: %s", result.payload)
         else:
@@ -115,12 +176,12 @@ async def main():
     mc.subscribe(
         EventType.CHANNEL_MSG_RECV,
         handle_channel_message,
-        attribute_filters={"channel_idx": CHANNEL_IDX},
+        attribute_filters={"channel_idx": channel_idx},
     )
     mc.subscribe(EventType.RX_LOG_DATA, handle_rx_log)
 
     _LOGGER.info(
-        "Listening on channel %d for messages containing '%s'", CHANNEL_IDX, TRIGGER_TEXT
+        "Listening on channel %d for messages containing '%s'", channel_idx, TRIGGER_TEXT
     )
 
     try:
