@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any
 
 from meshcore import MeshCore, EventType
 
@@ -17,46 +16,59 @@ BAUDRATE = int(os.environ.get("BAUDRATE", "115200"))
 CHANNEL_IDX = int(os.environ.get("CHANNEL_IDX", "1"))
 CHANNEL_NAME = os.environ.get("CHANNEL_NAME", "#test").strip()
 TRIGGER_TEXT = os.environ.get("TRIGGER_TEXT", "test").lower()
+# Text of a direct message that triggers a "path" reply (BlorkoBot-style).
+DM_TRIGGER_TEXT = os.environ.get("DM_TRIGGER_TEXT", "test").lower()
 DEVICE_NAME_OVERRIDE = os.environ.get("DEVICE_NAME", "")
+
+# Channel commands. "!path" replies on the channel with the message path;
+# "!dm" replies to the sender via a direct message with the same path.
+CMD_PATH = "!path"
+CMD_DM = "!dm"
 
 # Fallback upper bound for the channel scan when the firmware does not report
 # max_channels in its device info.
 DEFAULT_MAX_CHANNELS = 32
 
-latest_hop_count: int | None = None
+# meshcore payload types (see PAYLOAD_TYPENAMES in meshcore_parser.py).
+PAYLOAD_TYPE_TEXT_MSG = 2  # direct (1:1) text message
+PAYLOAD_TYPE_GRP_TXT = 5  # channel / group text message
+
+# The decoded CONTACT_MSG_RECV / CHANNEL_MSG_RECV events do not carry the path
+# the packet travelled, so we capture it from the RX_LOG_DATA event that the
+# firmware emits immediately before each decoded message. We keep the direct
+# and channel state separate (keyed by payload type) so a DM reply uses the
+# DM's path and a channel reply uses the channel message's path.
+#
+# All values come straight from meshcore's own packet parser (path,
+# path_hash_size, path_len), rather than re-parsing the raw packet header
+# ourselves: the header packs path_hash_size into the top two bits of the path
+# byte and may carry a 4-byte transport code before it, both of which a naive
+# fixed-offset parse gets wrong. ``path_len`` is meshcore's hop count.
+latest_dm_path: str = ""
+latest_dm_hash_size: int = 1
+latest_dm_hops: int = 0
+latest_chan_path: str = ""
+latest_chan_hash_size: int = 1
+latest_chan_hops: int = 0
 
 
-def parse_rx_log_data(payload: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    try:
-        hex_str = None
-        if isinstance(payload, dict):
-            hex_str = payload.get("payload") or payload.get("raw_hex")
-        elif isinstance(payload, (str, bytes)):
-            hex_str = payload
+def format_path(path_hex: str, hash_size: int = 1) -> str:
+    """Render a raw path hex string as ``P1 → P2 → P3``.
 
-        if not hex_str:
-            return result
-
-        if isinstance(hex_str, bytes):
-            hex_str = hex_str.hex()
-
-        hex_str = str(hex_str).lower().replace(" ", "").replace("\n", "").replace("\r", "")
-
-        if len(hex_str) < 4:
-            return result
-
-        result["header"] = hex_str[0:2]
-        try:
-            path_len = int(hex_str[2:4], 16)
-            result["path_len"] = path_len
-        except ValueError:
-            return {}
-
-    except Exception as ex:
-        _LOGGER.debug("Error parsing RX_LOG data: %s", ex)
-
-    return result
+    The MeshCore path is a hex string with ``hash_size`` bytes per hop, where
+    each hop is a prefix of a repeater's public key. We split it into per-hop
+    chunks and uppercase them, matching the node-prefix notation used by the
+    MeshCore apps and BlorkoBot. A zero-hop (directly received) packet has no
+    path bytes.
+    """
+    if not path_hex:
+        return "direct (0 hops)"
+    chars_per_hop = max(hash_size, 1) * 2
+    hops = [
+        path_hex[i : i + chars_per_hop].upper()
+        for i in range(0, len(path_hex), chars_per_hop)
+    ]
+    return " → ".join(hops)
 
 
 async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
@@ -104,8 +116,6 @@ async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
 
 
 async def main():
-    global latest_hop_count
-
     _LOGGER.info("Connecting to MeshCore device on %s at %d baud", SERIAL_PORT, BAUDRATE)
     mc = await MeshCore.create_serial(SERIAL_PORT, BAUDRATE)
     _LOGGER.info("Connected")
@@ -136,16 +146,23 @@ async def main():
     await mc.start_auto_message_fetching()
 
     async def handle_rx_log(event):
-        global latest_hop_count
+        global latest_dm_path, latest_dm_hash_size, latest_dm_hops
+        global latest_chan_path, latest_chan_hash_size, latest_chan_hops
         rx = event.payload or {}
-        raw = rx.get("payload")
-        if not raw:
-            return
-        parsed = parse_rx_log_data(raw)
-        hop_count = parsed.get("path_len")
-        if hop_count is not None:
-            latest_hop_count = hop_count
-            _LOGGER.debug("Updated hop count: %d", hop_count)
+
+        # meshcore has already parsed the packet for us; keep the most recent
+        # path/hop-count per message type so the next decoded message can report
+        # the route it took. path_len is meshcore's hop count (number of hops).
+        payload_type = rx.get("payload_type")
+        path = rx.get("path", "") or ""
+        hash_size = rx.get("path_hash_size", 1) or 1
+        hops = rx.get("path_len", 0) or 0
+        if payload_type == PAYLOAD_TYPE_TEXT_MSG:
+            latest_dm_path, latest_dm_hash_size, latest_dm_hops = path, hash_size, hops
+            _LOGGER.debug("Updated DM path: %s (%d hops)", path or "(direct)", hops)
+        elif payload_type == PAYLOAD_TYPE_GRP_TXT:
+            latest_chan_path, latest_chan_hash_size, latest_chan_hops = path, hash_size, hops
+            _LOGGER.debug("Updated channel path: %s (%d hops)", path or "(direct)", hops)
 
     async def handle_channel_message(event):
         msg = event.payload or {}
@@ -162,14 +179,46 @@ async def main():
 
         _LOGGER.info("Channel %s | %s: %s", chan, sender, text)
 
+        body_lower = body.lower()
+
+        # "!path" — reply on the channel with the path the message travelled.
+        if body_lower == CMD_PATH:
+            reply = f"path {format_path(latest_chan_path, latest_chan_hash_size)}"
+            _LOGGER.info("Sending channel path reply: %s", reply)
+            result = await mc.commands.send_chan_msg(channel_idx, reply)
+            if result.type == EventType.ERROR:
+                _LOGGER.error("Failed to send path reply: %s", result.payload)
+            else:
+                _LOGGER.info("Path reply sent successfully")
+            return
+
+        # "!dm" — direct-message the sender with the message's path. The channel
+        # message only carries the sender's display name, so we resolve it to a
+        # contact (and thus a public key) to address the reply.
+        if body_lower == CMD_DM:
+            await mc.ensure_contacts()
+            contact = mc.get_contact_by_name(sender)
+            if not contact:
+                _LOGGER.error(
+                    "!dm: no contact found for sender '%s'; cannot send DM", sender
+                )
+                return
+            reply = f"path {format_path(latest_chan_path, latest_chan_hash_size)}"
+            _LOGGER.info("Sending DM to %s: %s", sender, reply)
+            result = await mc.commands.send_msg(contact, reply)
+            if result.type == EventType.ERROR:
+                _LOGGER.error("Failed to send DM: %s", result.payload)
+            else:
+                _LOGGER.info("DM sent successfully")
+            return
+
         # Only respond when the message body starts with the trigger text
         # (case-insensitive). Matching the body — not the full "sender: text"
         # string — avoids false replies from sender names or mid-message hits.
-        if not body.lower().startswith(TRIGGER_TEXT):
+        if not body_lower.startswith(TRIGGER_TEXT):
             return
 
-        hops = latest_hop_count if latest_hop_count is not None else 0
-        reply = f"@[{sender}] {hops} hops to {device_name}"
+        reply = f"@[{sender}] {latest_chan_hops} hops to {device_name}"
         _LOGGER.info("Sending reply: %s", reply)
 
         result = await mc.commands.send_chan_msg(channel_idx, reply)
@@ -178,15 +227,46 @@ async def main():
         else:
             _LOGGER.info("Reply sent successfully")
 
+    async def handle_contact_message(event):
+        msg = event.payload or {}
+        text = (msg.get("text") or "").strip()
+        pubkey_prefix = msg.get("pubkey_prefix", "")
+        _LOGGER.info("DM from %s: %s", pubkey_prefix, text)
+
+        # Reply with the path only for the configured DM trigger text.
+        if text.lower() != DM_TRIGGER_TEXT:
+            return
+
+        reply = f"path {format_path(latest_dm_path, latest_dm_hash_size)}"
+
+        # send_msg accepts a contact dict or a public-key hex prefix. Prefer the
+        # full contact when we have it (it carries the 32-byte key); otherwise
+        # fall back to the 6-byte prefix from the received message.
+        await mc.ensure_contacts()
+        dest = mc.get_contact_by_key_prefix(pubkey_prefix) or pubkey_prefix
+        _LOGGER.info("Sending DM reply to %s: %s", pubkey_prefix, reply)
+        result = await mc.commands.send_msg(dest, reply)
+        if result.type == EventType.ERROR:
+            _LOGGER.error("Failed to send DM reply: %s", result.payload)
+        else:
+            _LOGGER.info("DM reply sent successfully")
+
     mc.subscribe(
         EventType.CHANNEL_MSG_RECV,
         handle_channel_message,
         attribute_filters={"channel_idx": channel_idx},
     )
+    mc.subscribe(EventType.CONTACT_MSG_RECV, handle_contact_message)
     mc.subscribe(EventType.RX_LOG_DATA, handle_rx_log)
 
     _LOGGER.info(
-        "Listening on channel %d for messages containing '%s'", channel_idx, TRIGGER_TEXT
+        "Listening on channel %d for '%s'; channel commands '%s'/'%s'; "
+        "DM trigger '%s'",
+        channel_idx,
+        TRIGGER_TEXT,
+        CMD_PATH,
+        CMD_DM,
+        DM_TRIGGER_TEXT,
     )
 
     try:

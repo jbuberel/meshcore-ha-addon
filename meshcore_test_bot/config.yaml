@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.1.1"
+version: "1.2.0"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -22,6 +22,7 @@ options:
   channel_name: "#test"
   channel_idx: 1
   trigger_text: "test"
+  dm_trigger_text: "test"
   device_name: ""
 
 schema:
@@ -30,6 +31,7 @@ schema:
   channel_name: str
   channel_idx: int
   trigger_text: str
+  dm_trigger_text: str
   device_name: str
 
 # uart: true auto-discovers serial/UART devices and grants the container the

@@ -1,10 +1,30 @@
 # MeshCore Test Bot — Home Assistant Add-on
 
-A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) device over USB serial for messages on a configurable channel. When it sees a message containing the trigger text (default: `"test"`), it auto-replies with:
+A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) device over USB serial and auto-replies to a few simple commands.
+
+When it sees a channel message containing the trigger text (default: `"test"`), it replies with:
 
 ```
 @<sender>: <N> hops from <device-name>
 ```
+
+### Path commands
+
+Inspired by [BlorkoBot](https://github.com/statico/blorkobot), the bot also reports the path a message travelled through the mesh, formatted as the node prefix of each hop:
+
+```
+path P1 → P2 → P3
+```
+
+where each `Pn` is the one-byte public-key prefix (uppercase hex) of a repeater in the path. A directly received message (zero hops) shows `path direct (0 hops)`.
+
+| Trigger | Where | Response |
+|---|---|---|
+| `test` (the `dm_trigger_text`) | **Direct message** to the device | A **direct message** reply with the DM's path |
+| `!path` | On the monitored channel (e.g. `#test`) | A **channel** reply with the message's path |
+| `!dm` | On the monitored channel (e.g. `#test`) | A **direct message** to the sender with the message's path |
+
+> The path is read from the device's RX log for the most recently received message of the matching type (direct vs. channel), since the decoded message events do not themselves carry the path. The `!dm` command resolves the sender's display name to a contact in order to address the reply, so the sender must be a known contact on the device.
 
 ## Installation
 
@@ -24,7 +44,8 @@ A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) devic
 | `baudrate` | `115200` | Serial baud rate |
 | `channel_name` | `#test` | Channel name to monitor. The add-on queries the device at startup and uses the matching channel's index automatically. If no channel with this name is found, the add-on logs the channels it did find and exits. Leave empty to use `channel_idx` instead. |
 | `channel_idx` | `1` | Channel index (0-based), used only when `channel_name` is empty. |
-| `trigger_text` | `test` | Text to match in incoming messages (case-insensitive) |
+| `trigger_text` | `test` | Channel-message text that triggers the `@<sender>: N hops` reply (case-insensitive) |
+| `dm_trigger_text` | `test` | Direct-message text that triggers a `path …` direct-message reply (case-insensitive) |
 | `device_name` | *(empty)* | Override the device name used in replies. If empty, auto-detected from device. |
 
 Example `options` in the add-on UI:
@@ -35,6 +56,7 @@ baudrate: 115200
 channel_name: "#test"
 channel_idx: 1
 trigger_text: test
+dm_trigger_text: test
 device_name: ""
 ```
 
