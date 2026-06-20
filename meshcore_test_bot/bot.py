@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections import deque
 
 from meshcore import MeshCore, EventType
 
@@ -50,6 +51,33 @@ latest_dm_hops: int = 0
 latest_chan_path: str = ""
 latest_chan_hash_size: int = 1
 latest_chan_hops: int = 0
+
+
+# Idempotency guard. MeshCore delivery is at-least-once: the firmware can
+# re-deliver the same message, and we observed that replying from inside the
+# receive handler (which runs concurrently with the library's auto-fetch drain
+# loop) provokes the firmware to re-deliver the just-received message in a tight
+# loop — producing endless duplicate replies. Tracking a stable per-message
+# identity makes handling idempotent: the first re-delivery is ignored instead
+# of triggering another send, which also breaks that feedback loop.
+_SEEN_MAX = 256
+_seen_keys: set = set()
+_seen_order: deque = deque()
+
+
+def already_handled(key: tuple) -> bool:
+    """Return True if ``key`` was seen before; otherwise record it and return False.
+
+    Keeps at most ``_SEEN_MAX`` recent keys so memory stays bounded on a
+    long-running bot.
+    """
+    if key in _seen_keys:
+        return True
+    _seen_keys.add(key)
+    _seen_order.append(key)
+    if len(_seen_order) > _SEEN_MAX:
+        _seen_keys.discard(_seen_order.popleft())
+    return False
 
 
 def format_path(path_hex: str, hash_size: int = 1) -> str:
@@ -143,7 +171,42 @@ async def main():
     else:
         channel_idx = CHANNEL_IDX
 
+    # Preload the contact list once. get_contact_by_* are then pure local
+    # lookups, so the receive callbacks never do device I/O to resolve a
+    # contact. (ensure_contacts only refetches when the cache is empty, so the
+    # old per-message calls were no-ops after the first one anyway.)
+    await mc.ensure_contacts()
+
     await mc.start_auto_message_fetching()
+
+    # Outbound replies are funneled through this queue and sent by a single
+    # worker task. The message-received callbacks never touch the device
+    # themselves — they only decide *what* to say and enqueue it. This mirrors
+    # BlorkoBot's design (its plugin returns a string and the host process does
+    # the send) and keeps device commands out of the receive callbacks, which
+    # run concurrently with meshcore's auto-fetch drain loop. Issuing sends from
+    # inside those callbacks was the root cause of the duplicate-reply loop; the
+    # already_handled() dedupe is the backstop.
+    reply_queue: asyncio.Queue = asyncio.Queue()
+
+    async def reply_worker():
+        while True:
+            kind, target, text = await reply_queue.get()
+            try:
+                if kind == "chan":
+                    result = await mc.commands.send_chan_msg(target, text)
+                else:
+                    result = await mc.commands.send_msg(target, text)
+                if result.type == EventType.ERROR:
+                    _LOGGER.error(
+                        "Failed to send %s reply '%s': %s", kind, text, result.payload
+                    )
+                else:
+                    _LOGGER.info("Sent %s reply: %s", kind, text)
+            except Exception:
+                _LOGGER.exception("Error sending %s reply '%s'", kind, text)
+            finally:
+                reply_queue.task_done()
 
     async def handle_rx_log(event):
         global latest_dm_path, latest_dm_hash_size, latest_dm_hops
@@ -169,6 +232,13 @@ async def main():
         text = msg.get("text", "")
         chan = msg.get("channel_idx")
 
+        # Drop re-deliveries of a message we've already handled (see
+        # already_handled). sender_timestamp + channel + text uniquely identifies
+        # the original message across re-delivery.
+        if already_handled(("chan", chan, msg.get("sender_timestamp"), text)):
+            _LOGGER.debug("Ignoring duplicate channel message on %s: %s", chan, text)
+            return
+
         # Extract sender and body: meshcore channel messages are formatted
         # as "sender: text".
         if ":" in text:
@@ -184,19 +254,14 @@ async def main():
         # "!path" — reply on the channel with the path the message travelled.
         if body_lower == CMD_PATH:
             reply = f"path {format_path(latest_chan_path, latest_chan_hash_size)}"
-            _LOGGER.info("Sending channel path reply: %s", reply)
-            result = await mc.commands.send_chan_msg(channel_idx, reply)
-            if result.type == EventType.ERROR:
-                _LOGGER.error("Failed to send path reply: %s", result.payload)
-            else:
-                _LOGGER.info("Path reply sent successfully")
+            reply_queue.put_nowait(("chan", channel_idx, reply))
             return
 
         # "!dm" — direct-message the sender with the message's path. The channel
         # message only carries the sender's display name, so we resolve it to a
-        # contact (and thus a public key) to address the reply.
+        # contact (and thus a public key) to address the reply. Contacts were
+        # preloaded at startup, so this lookup does no device I/O.
         if body_lower == CMD_DM:
-            await mc.ensure_contacts()
             contact = mc.get_contact_by_name(sender)
             if not contact:
                 _LOGGER.error(
@@ -204,12 +269,7 @@ async def main():
                 )
                 return
             reply = f"path {format_path(latest_chan_path, latest_chan_hash_size)}"
-            _LOGGER.info("Sending DM to %s: %s", sender, reply)
-            result = await mc.commands.send_msg(contact, reply)
-            if result.type == EventType.ERROR:
-                _LOGGER.error("Failed to send DM: %s", result.payload)
-            else:
-                _LOGGER.info("DM sent successfully")
+            reply_queue.put_nowait(("dm", contact, reply))
             return
 
         # Only respond when the message body starts with the trigger text
@@ -219,18 +279,20 @@ async def main():
             return
 
         reply = f"@[{sender}] {latest_chan_hops} hops to {device_name}"
-        _LOGGER.info("Sending reply: %s", reply)
-
-        result = await mc.commands.send_chan_msg(channel_idx, reply)
-        if result.type == EventType.ERROR:
-            _LOGGER.error("Failed to send reply: %s", result.payload)
-        else:
-            _LOGGER.info("Reply sent successfully")
+        reply_queue.put_nowait(("chan", channel_idx, reply))
 
     async def handle_contact_message(event):
         msg = event.payload or {}
         text = (msg.get("text") or "").strip()
         pubkey_prefix = msg.get("pubkey_prefix", "")
+
+        # Drop re-deliveries of a message we've already handled (see
+        # already_handled). sender_timestamp + sender + text uniquely identifies
+        # the original message across re-delivery.
+        if already_handled(("dm", pubkey_prefix, msg.get("sender_timestamp"), text)):
+            _LOGGER.debug("Ignoring duplicate DM from %s: %s", pubkey_prefix, text)
+            return
+
         _LOGGER.info("DM from %s: %s", pubkey_prefix, text)
 
         # Reply with the path only for the configured DM trigger text.
@@ -241,15 +303,10 @@ async def main():
 
         # send_msg accepts a contact dict or a public-key hex prefix. Prefer the
         # full contact when we have it (it carries the 32-byte key); otherwise
-        # fall back to the 6-byte prefix from the received message.
-        await mc.ensure_contacts()
+        # fall back to the 6-byte prefix from the received message. Contacts were
+        # preloaded at startup, so this is a local lookup with no device I/O.
         dest = mc.get_contact_by_key_prefix(pubkey_prefix) or pubkey_prefix
-        _LOGGER.info("Sending DM reply to %s: %s", pubkey_prefix, reply)
-        result = await mc.commands.send_msg(dest, reply)
-        if result.type == EventType.ERROR:
-            _LOGGER.error("Failed to send DM reply: %s", result.payload)
-        else:
-            _LOGGER.info("DM reply sent successfully")
+        reply_queue.put_nowait(("dm", dest, reply))
 
     mc.subscribe(
         EventType.CHANNEL_MSG_RECV,
@@ -258,6 +315,8 @@ async def main():
     )
     mc.subscribe(EventType.CONTACT_MSG_RECV, handle_contact_message)
     mc.subscribe(EventType.RX_LOG_DATA, handle_rx_log)
+
+    worker_task = asyncio.create_task(reply_worker())
 
     _LOGGER.info(
         "Listening on channel %d for '%s'; channel commands '%s'/'%s'; "
@@ -275,6 +334,7 @@ async def main():
     except (KeyboardInterrupt, asyncio.CancelledError):
         _LOGGER.info("Shutting down")
     finally:
+        worker_task.cancel()
         await mc.stop_auto_message_fetching()
         await mc.disconnect()
         _LOGGER.info("Disconnected")
