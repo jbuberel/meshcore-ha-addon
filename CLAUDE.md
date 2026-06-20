@@ -17,9 +17,28 @@ auto-replies to channel and direct messages.
 
 ## Releasing
 
-Pushing to `main` triggers the multi-arch Docker build. To ship a change you
-**must bump `version:` in `meshcore_test_bot/config.yaml`** (HA only pulls a new
-image when the version changes). Use semver: patch for fixes, minor for features.
+Releases are **fully automated from `config.yaml`** — there is no manual
+`git tag` step.
+
+1. Bump `version:` in `meshcore_test_bot/config.yaml` (semver: patch for fixes,
+   minor for features) and push to `main` / merge a PR. You **must** bump it —
+   HA only pulls a new image when the version changes.
+2. The `build` job builds and pushes multi-arch images to GHCR.
+3. The `release` ("Tag and Release") job reads that version and, if no matching
+   `vX.Y.Z` tag exists yet, uses `softprops/action-gh-release` to create **both**
+   the tag (at the merge commit) and a GitHub Release with generated notes.
+   Pushing `main` without bumping the version is a safe no-op — the tag-exists
+   check skips the release step.
+
+Notes / gotchas:
+
+- Tags are an **output** of the `main` build, not a trigger. The workflow has no
+  `tags: v*` trigger — don't add one, and don't push tags manually (it would
+  desync the tag from the automated flow).
+- Tags created with `GITHUB_TOKEN` do not re-trigger workflows, so there is no
+  build loop.
+- The workflow only acts on the *current* `config.yaml` version; it never
+  backfills tags for versions that were merged before this automation existed.
 
 ## Lessons learned
 
