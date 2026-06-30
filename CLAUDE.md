@@ -7,7 +7,13 @@ auto-replies to channel and direct messages.
 ## Layout
 
 - `meshcore_test_bot/bot.py` — the bot. Connects via the `meshcore` Python
-  library, subscribes to message events, and replies.
+  library, subscribes to message events, and replies. Also runs an optional
+  daily remote time-sync: at `time_sync_at` it logs in to each configured
+  repeater/room-server (`time_sync_devices`) and sends the firmware CLI
+  `time <epoch>` to set its clock to the host's time. The sync runs *on the
+  single reply worker* (enqueued as a `("timesync",)` job), not from its own
+  task, so admin commands stay serialized with message replies — the same
+  one-coroutine-owns-the-link rule as everything else (see Lessons learned).
 - `meshcore_test_bot/config.yaml` — HA add-on manifest. **`version:` here drives
   releases** (see Releasing).
 - `meshcore_test_bot/run.sh` — bashio entrypoint; exports each `config.yaml`

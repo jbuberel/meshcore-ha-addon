@@ -1,8 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
 from collections import deque
+from datetime import datetime, timedelta
 
 from meshcore import MeshCore, EventType
 
@@ -20,6 +23,31 @@ TRIGGER_TEXT = os.environ.get("TRIGGER_TEXT", "test").lower()
 # Text of a direct message that triggers a "path" reply (BlorkoBot-style).
 DM_TRIGGER_TEXT = os.environ.get("DM_TRIGGER_TEXT", "test").lower()
 DEVICE_NAME_OVERRIDE = os.environ.get("DEVICE_NAME", "")
+
+# Daily remote time-sync. When enabled, once per day at TIME_SYNC_AT (local
+# HH:MM) the bot logs in to each configured repeater/room-server and sets its
+# clock to the HA host's time. Devices are a JSON list of
+# {pubkey, password, name?} (pubkey is the full 64-hex-char public key).
+TIME_SYNC_ENABLED = os.environ.get("TIME_SYNC_ENABLED", "false").lower() == "true"
+TIME_SYNC_AT = os.environ.get("TIME_SYNC_AT", "03:30").strip()
+
+
+def _parse_time_sync_devices() -> list[dict]:
+    raw = os.environ.get("TIME_SYNC_DEVICES", "").strip()
+    if not raw:
+        return []
+    try:
+        devices = json.loads(raw)
+    except json.JSONDecodeError:
+        _LOGGER.error("TIME_SYNC_DEVICES is not valid JSON; ignoring: %r", raw)
+        return []
+    if not isinstance(devices, list):
+        _LOGGER.error("TIME_SYNC_DEVICES is not a list; ignoring")
+        return []
+    return devices
+
+
+TIME_SYNC_DEVICES = _parse_time_sync_devices()
 
 # Channel commands. "!path" replies on the channel with the message path;
 # "!dm" replies to the sender via a direct message with the same path.
@@ -97,6 +125,21 @@ def format_path(path_hex: str, hash_size: int = 1) -> str:
         for i in range(0, len(path_hex), chars_per_hop)
     ]
     return " → ".join(hops)
+
+
+def seconds_until(hhmm: str) -> float:
+    """Seconds from now until the next local-time occurrence of ``HH:MM``.
+
+    Uses the container's local clock (HA Supervisor passes the system timezone
+    to add-ons), so the trigger fires at the wall-clock time the user
+    configured. The epoch we later push to the device is timezone-independent.
+    """
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    now = datetime.now()
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
 
 
 async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
@@ -189,10 +232,57 @@ async def main():
     # already_handled() dedupe is the backstop.
     reply_queue: asyncio.Queue = asyncio.Queue()
 
+    async def run_time_sync():
+        """Log in to each configured device and set its clock to host time.
+
+        Runs on the single reply worker so it is serialized against message
+        replies — only one coroutine ever drives the serial link at a time,
+        which is the rule the whole bot follows (see CLAUDE.md). Per-device
+        failures are logged and skipped; one bad device never aborts the rest.
+        """
+        _LOGGER.info("Time sync: starting for %d device(s)", len(TIME_SYNC_DEVICES))
+        for dev in TIME_SYNC_DEVICES:
+            pubkey = (dev.get("pubkey") or "").strip()
+            password = dev.get("password") or ""
+            label = dev.get("name") or (pubkey[:12] if pubkey else "(no pubkey)")
+            if not pubkey:
+                _LOGGER.error("Time sync: device entry missing 'pubkey'; skipping")
+                continue
+            try:
+                # Login requires the full 32-byte public key.
+                login = await mc.commands.send_login_sync(pubkey, password)
+                if login is None or login.type == EventType.ERROR:
+                    _LOGGER.error("Time sync: login failed for %s", label)
+                    continue
+
+                # Address the command via the known contact (uses its routing
+                # path) when we have one; otherwise fall back to the raw key.
+                dest = mc.get_contact_by_key_prefix(pubkey) or pubkey
+                epoch = int(time.time())
+                result = await mc.commands.send_cmd(dest, f"time {epoch}")
+                if result.type == EventType.ERROR:
+                    _LOGGER.error(
+                        "Time sync: set-time failed for %s: %s", label, result.payload
+                    )
+                else:
+                    _LOGGER.info("Time sync: set %s clock to %d", label, epoch)
+
+                await mc.commands.send_logout(pubkey)
+            except Exception:
+                _LOGGER.exception("Time sync: error syncing %s", label)
+            # Let the mesh settle before the next device.
+            await asyncio.sleep(2)
+        _LOGGER.info("Time sync: done")
+
     async def reply_worker():
         while True:
-            kind, target, text = await reply_queue.get()
+            job = await reply_queue.get()
             try:
+                kind = job[0]
+                if kind == "timesync":
+                    await run_time_sync()
+                    continue
+                _, target, text = job
                 if kind == "chan":
                     result = await mc.commands.send_chan_msg(target, text)
                 else:
@@ -204,9 +294,21 @@ async def main():
                 else:
                     _LOGGER.info("Sent %s reply: %s", kind, text)
             except Exception:
-                _LOGGER.exception("Error sending %s reply '%s'", kind, text)
+                _LOGGER.exception("Error handling job %r", job)
             finally:
                 reply_queue.task_done()
+
+    async def time_sync_scheduler():
+        """Enqueue a time-sync job once per day at the configured local time."""
+        while True:
+            delay = seconds_until(TIME_SYNC_AT)
+            _LOGGER.info(
+                "Time sync: next run at %s (in %.0f min)", TIME_SYNC_AT, delay / 60
+            )
+            await asyncio.sleep(delay)
+            reply_queue.put_nowait(("timesync",))
+            # Guard against re-firing within the same minute after a short sleep.
+            await asyncio.sleep(60)
 
     async def handle_rx_log(event):
         global latest_dm_path, latest_dm_hash_size, latest_dm_hops
@@ -318,6 +420,17 @@ async def main():
 
     worker_task = asyncio.create_task(reply_worker())
 
+    scheduler_task = None
+    if TIME_SYNC_ENABLED and TIME_SYNC_DEVICES:
+        scheduler_task = asyncio.create_task(time_sync_scheduler())
+        _LOGGER.info(
+            "Daily time sync enabled at %s for %d device(s)",
+            TIME_SYNC_AT,
+            len(TIME_SYNC_DEVICES),
+        )
+    elif TIME_SYNC_ENABLED:
+        _LOGGER.warning("Time sync enabled but no devices configured; skipping")
+
     _LOGGER.info(
         "Listening on channel %d for '%s'; channel commands '%s'/'%s'; "
         "DM trigger '%s'",
@@ -335,6 +448,8 @@ async def main():
         _LOGGER.info("Shutting down")
     finally:
         worker_task.cancel()
+        if scheduler_task is not None:
+            scheduler_task.cancel()
         await mc.stop_auto_message_fetching()
         await mc.disconnect()
         _LOGGER.info("Disconnected")

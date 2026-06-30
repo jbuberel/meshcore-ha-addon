@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.2.1"
+version: "1.3.0"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -24,6 +24,9 @@ options:
   trigger_text: "test"
   dm_trigger_text: "test"
   device_name: ""
+  time_sync_enabled: false
+  time_sync_at: "03:30"
+  time_sync_devices: []
 
 schema:
   serial_port: str
@@ -33,6 +36,12 @@ schema:
   trigger_text: str
   dm_trigger_text: str
   device_name: str
+  time_sync_enabled: bool
+  time_sync_at: str
+  time_sync_devices:
+    - pubkey: str
+      password: password
+      name: str?
 
 # uart: true auto-discovers serial/UART devices and grants the container the
 # correct cgroup device permissions (fixes "Operation not permitted" / EPERM).
