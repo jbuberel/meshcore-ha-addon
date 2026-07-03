@@ -47,6 +47,9 @@ where each `Pn` is the one-byte public-key prefix (uppercase hex) of a repeater 
 | `trigger_text` | `test` | Channel-message text that triggers the `@<sender>: N hops` reply (case-insensitive) |
 | `dm_trigger_text` | `test` | Direct-message text that triggers a `path …` direct-message reply (case-insensitive) |
 | `device_name` | *(empty)* | Override the device name used in replies. If empty, auto-detected from device. |
+| `time_sync_enabled` | `false` | Enable the daily remote clock sync (see [Remote time sync](#remote-time-sync)). |
+| `time_sync_at` | `03:30` | Local time (24-hour `HH:MM`) at which the daily sync runs. |
+| `time_sync_devices` | *(empty list)* | Repeaters/room-servers to sync. Each entry has a `pubkey`, `password`, and optional `name`. |
 
 Example `options` in the add-on UI:
 
@@ -58,6 +61,15 @@ channel_idx: 1
 trigger_text: test
 dm_trigger_text: test
 device_name: ""
+time_sync_enabled: true
+time_sync_at: "03:30"
+time_sync_devices:
+  - name: Repeater North
+    pubkey: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    password: secret-admin-password
+  - name: Room Server
+    pubkey: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    password: another-password
 ```
 
 ## Channel selection
@@ -74,6 +86,46 @@ listing every channel name it found and exits, so you can correct the
 If `channel_name` is left empty, the add-on instead uses the static
 `channel_idx` (zero-based, matching the order channels appear in the MeshCore
 app).
+
+## Remote time sync
+
+Repeaters and room-servers keep their own clocks, which drift over time. When
+`time_sync_enabled` is `true`, the add-on runs a **daily** clock sync: once per
+day at `time_sync_at` (your HA server's local time) it connects to each device
+in `time_sync_devices`, one at a time, and sets its clock to the Home Assistant
+host's current time.
+
+For each device it logs in with the admin password, issues the firmware CLI
+command [`time <epoch>`](https://docs.meshcore.io/cli_commands/#set-the-time-to-a-specific-timestamp),
+and logs out. The time pushed is UTC epoch seconds, so it is correct regardless
+of your server's timezone. Devices are synced sequentially with a short pause
+between each. If a device can't be reached or the login fails, the error is
+logged and the add-on moves on to the next one.
+
+Each entry in `time_sync_devices` has:
+
+| Field | Required | Description |
+|---|---|---|
+| `pubkey` | yes | The device's **full public key** — 64 hex characters (32 bytes). A short 6-byte prefix will **not** work; the login requires the full key. |
+| `password` | yes | The device's remote-admin password. |
+| `name` | no | A friendly label used only in the add-on log. Defaults to the start of the pubkey. |
+
+```yaml
+time_sync_enabled: true
+time_sync_at: "03:30"
+time_sync_devices:
+  - name: Repeater North
+    pubkey: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    password: secret-admin-password
+```
+
+**Finding a device's public key:** in the MeshCore app, open the repeater or
+room-server contact and copy its full public key. The device must already be a
+known contact on the bot's node so the sync command can be routed to it.
+
+> The sync shares the same single command channel as the message auto-replies,
+> so admin commands and replies never overlap on the serial link. A sync of
+> several devices takes a few seconds; replies simply queue behind it.
 
 ## USB serial device access
 
@@ -111,7 +163,14 @@ docker build \
 
 ### Releasing a new version
 
-1. Update `version:` in [`meshcore_test_bot/config.yaml`](meshcore_test_bot/config.yaml).
-2. Commit and push.
-3. Create a git tag matching the version: `git tag v1.0.1 && git push origin v1.0.1`.
-4. GitHub Actions will build all four architectures and publish to GHCR automatically.
+Releases are **fully automated from `config.yaml`** — there is no manual
+`git tag` step.
+
+1. Bump `version:` in [`meshcore_test_bot/config.yaml`](meshcore_test_bot/config.yaml)
+   (semver: patch for fixes, minor for features). You **must** bump it — Home
+   Assistant only pulls a new image when the version changes.
+2. Commit and push to `main` (or merge a PR).
+3. GitHub Actions builds all four architectures and publishes to GHCR, then
+   reads the version and, if no matching `vX.Y.Z` tag exists yet, creates both
+   the tag and a GitHub Release with generated notes. Pushing without bumping
+   the version is a safe no-op.
