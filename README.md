@@ -127,6 +127,25 @@ known contact on the bot's node so the sync command can be routed to it.
 > so admin commands and replies never overlap on the serial link. A sync of
 > several devices takes a few seconds; replies simply queue behind it.
 
+### Manual trigger
+
+The add-on has its own entry in the Home Assistant sidebar (an *ingress*
+panel) with a **Sync Now** button that runs the same sync immediately,
+independent of the daily schedule — handy for testing your `time_sync_devices`
+config or re-running after fixing a password, without waiting for
+`time_sync_at`. The page updates itself with a per-device OK/FAILED result and
+the failure detail once the run finishes.
+
+This panel is visible to **any signed-in Home Assistant user with dashboard
+access**, not just admins — there's no separate login or token, since it rides
+on your existing Home Assistant session the same way any other add-on panel
+does. It's never exposed on your LAN directly: Home Assistant's ingress proxy
+is the only way to reach it.
+
+Clicking the button while a sync is already running (from the schedule or
+another click) is a no-op — the add-on refuses to double-queue a run and the
+button disables itself until the current one finishes.
+
 ## USB serial device access
 
 The add-on uses the `uart: true` flag, which grants the container the correct

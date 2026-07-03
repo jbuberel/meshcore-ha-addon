@@ -7,6 +7,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
+from aiohttp import web
 from meshcore import MeshCore, EventType
 
 logging.basicConfig(
@@ -30,6 +31,11 @@ DEVICE_NAME_OVERRIDE = os.environ.get("DEVICE_NAME", "")
 # {pubkey, password, name?} (pubkey is the full 64-hex-char public key).
 TIME_SYNC_ENABLED = os.environ.get("TIME_SYNC_ENABLED", "false").lower() == "true"
 TIME_SYNC_AT = os.environ.get("TIME_SYNC_AT", "03:30").strip()
+
+# Must match `ingress_port:` in config.yaml. Ingress-only (no `ports:` entry),
+# so this is reachable only via HA's authenticated ingress proxy, never
+# directly on the LAN.
+WEB_PORT = 8099
 
 
 def _parse_time_sync_devices() -> list[dict]:
@@ -182,6 +188,68 @@ async def wait_for_login_outcome(mc: MeshCore, timeout: float) -> tuple[bool, st
     return False, f"no response within {timeout:.1f}s (device unreachable or busy)"
 
 
+def render_status_html(status: dict, devices_configured: bool) -> str:
+    """Render the ingress "Sync Now" page. Vanilla HTML/JS, no build step or
+    external assets, so it works regardless of the ingress path prefix HA
+    assigns — everything is fetched relative to the current page URL."""
+    if not devices_configured:
+        body = "<p>No <code>time_sync_devices</code> are configured.</p>"
+    else:
+        button_disabled = "disabled" if status["running"] else ""
+        body = f"""
+        <button id="sync-btn" {button_disabled} onclick="triggerSync()">Sync Now</button>
+        <p id="sync-msg"></p>
+        <div id="results"></div>
+        """
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MeshCore Time Sync</title>
+<style>
+  body {{ font-family: sans-serif; margin: 2em; }}
+  button {{ font-size: 1em; padding: 0.5em 1em; }}
+  table {{ border-collapse: collapse; margin-top: 1em; }}
+  td, th {{ border: 1px solid #ccc; padding: 0.4em 0.8em; text-align: left; }}
+  .ok {{ color: green; }}
+  .fail {{ color: #b00; }}
+</style>
+</head>
+<body>
+<h2>MeshCore Remote Time Sync</h2>
+{body}
+<script>
+function renderStatus(s) {{
+  document.getElementById('sync-btn').disabled = s.running;
+  var msg = s.running ? 'Sync in progress...' : (s.finished_at ? 'Last run: ' + s.finished_at : '');
+  document.getElementById('sync-msg').textContent = msg;
+  var rows = s.results.map(function(r) {{
+    return '<tr><td>' + r.name + '</td><td class="' + (r.ok ? 'ok' : 'fail') + '">' +
+           (r.ok ? 'OK' : 'FAILED') + '</td><td>' + r.detail + '</td></tr>';
+  }}).join('');
+  document.getElementById('results').innerHTML = rows ?
+    '<table><tr><th>Device</th><th>Result</th><th>Detail</th></tr>' + rows + '</table>' : '';
+  if (s.running) {{ setTimeout(poll, 2000); }}
+}}
+function poll() {{
+  fetch('status').then(function(r) {{ return r.json(); }}).then(renderStatus);
+}}
+function triggerSync() {{
+  document.getElementById('sync-btn').disabled = true;
+  document.getElementById('sync-msg').textContent = 'Starting...';
+  fetch('trigger', {{ method: 'POST' }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(r) {{
+      if (!r.ok) {{ document.getElementById('sync-msg').textContent = 'Error: ' + r.error; }}
+      poll();
+    }});
+}}
+poll();
+</script>
+</body>
+</html>"""
+
+
 async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
     """Find the index of the channel named ``name`` by querying the device.
 
@@ -272,6 +340,36 @@ async def main():
     # already_handled() dedupe is the backstop.
     reply_queue: asyncio.Queue = asyncio.Queue()
 
+    # Shared state read by the ingress web UI so a manual "Sync Now" click (or
+    # the daily scheduler) has somewhere to report progress and per-device
+    # results, since the actual work happens later on the reply worker.
+    time_sync_status = {
+        "running": False,
+        "started_at": None,
+        "finished_at": None,
+        "results": [],
+    }
+
+    def enqueue_time_sync(source: str) -> bool:
+        """Queue a timesync job unless one is already queued/running.
+
+        Returns False (and does nothing) if a sync is already in flight, so a
+        double-click on the web UI or an unlucky overlap with the daily
+        schedule can't queue two runs back to back.
+        """
+        if time_sync_status["running"]:
+            _LOGGER.info(
+                "Time sync: %s trigger ignored, a sync is already running", source
+            )
+            return False
+        time_sync_status["running"] = True
+        time_sync_status["started_at"] = datetime.now().isoformat(timespec="seconds")
+        time_sync_status["finished_at"] = None
+        time_sync_status["results"] = []
+        reply_queue.put_nowait(("timesync",))
+        _LOGGER.info("Time sync: %s trigger queued", source)
+        return True
+
     async def run_time_sync():
         """Log in to each configured device and set its clock to host time.
 
@@ -280,59 +378,90 @@ async def main():
         which is the rule the whole bot follows (see CLAUDE.md). Per-device
         failures are logged and skipped; one bad device never aborts the rest.
         """
-        _LOGGER.info("Time sync: starting for %d device(s)", len(TIME_SYNC_DEVICES))
-        for dev in TIME_SYNC_DEVICES:
-            pubkey = (dev.get("pubkey") or "").strip()
-            password = dev.get("password") or ""
-            label = dev.get("name") or (pubkey[:12] if pubkey else "(no pubkey)")
-            if not pubkey:
-                _LOGGER.error("Time sync: device entry missing 'pubkey'; skipping")
-                continue
-            try:
-                # Login requires the full 32-byte public key. We drive the
-                # handshake ourselves (rather than send_login_sync) because
-                # that helper only waits for LOGIN_SUCCESS: a wrong password
-                # (which the firmware answers with LOGIN_FAILED) and an
-                # unreachable device both just look like a timeout. Racing
-                # both event types lets us log which one actually happened.
-                sent = await mc.commands.send_login(pubkey, password)
-                if sent.type == EventType.ERROR:
+        try:
+            _LOGGER.info(
+                "Time sync: starting for %d device(s)", len(TIME_SYNC_DEVICES)
+            )
+            for dev in TIME_SYNC_DEVICES:
+                pubkey = (dev.get("pubkey") or "").strip()
+                password = dev.get("password") or ""
+                label = dev.get("name") or (pubkey[:12] if pubkey else "(no pubkey)")
+                if not pubkey:
                     _LOGGER.error(
-                        "Time sync: login failed for %s: could not send "
-                        "login request (%s)",
-                        label,
-                        sent.payload,
+                        "Time sync: device entry missing 'pubkey'; skipping"
+                    )
+                    time_sync_status["results"].append(
+                        {"name": label, "ok": False, "detail": "missing 'pubkey'"}
                     )
                     continue
+                try:
+                    # Login requires the full 32-byte public key. We drive the
+                    # handshake ourselves (rather than send_login_sync) because
+                    # that helper only waits for LOGIN_SUCCESS: a wrong password
+                    # (which the firmware answers with LOGIN_FAILED) and an
+                    # unreachable device both just look like a timeout. Racing
+                    # both event types lets us log which one actually happened.
+                    sent = await mc.commands.send_login(pubkey, password)
+                    if sent.type == EventType.ERROR:
+                        detail = f"could not send login request ({sent.payload})"
+                        _LOGGER.error(
+                            "Time sync: login failed for %s: %s", label, detail
+                        )
+                        time_sync_status["results"].append(
+                            {"name": label, "ok": False, "detail": detail}
+                        )
+                        continue
 
-                suggested_timeout = (sent.payload or {}).get(
-                    "suggested_timeout", 4000
-                )
-                ok, reason = await wait_for_login_outcome(
-                    mc, suggested_timeout / 800
-                )
-                if not ok:
-                    _LOGGER.error("Time sync: login failed for %s: %s", label, reason)
-                    continue
-
-                # Address the command via the known contact (uses its routing
-                # path) when we have one; otherwise fall back to the raw key.
-                dest = mc.get_contact_by_key_prefix(pubkey) or pubkey
-                epoch = int(time.time())
-                result = await mc.commands.send_cmd(dest, f"time {epoch}")
-                if result.type == EventType.ERROR:
-                    _LOGGER.error(
-                        "Time sync: set-time failed for %s: %s", label, result.payload
+                    suggested_timeout = (sent.payload or {}).get(
+                        "suggested_timeout", 4000
                     )
-                else:
-                    _LOGGER.info("Time sync: set %s clock to %d", label, epoch)
+                    ok, reason = await wait_for_login_outcome(
+                        mc, suggested_timeout / 800
+                    )
+                    if not ok:
+                        _LOGGER.error(
+                            "Time sync: login failed for %s: %s", label, reason
+                        )
+                        time_sync_status["results"].append(
+                            {"name": label, "ok": False, "detail": reason}
+                        )
+                        continue
 
-                await mc.commands.send_logout(pubkey)
-            except Exception:
-                _LOGGER.exception("Time sync: error syncing %s", label)
-            # Let the mesh settle before the next device.
-            await asyncio.sleep(2)
-        _LOGGER.info("Time sync: done")
+                    # Address the command via the known contact (uses its routing
+                    # path) when we have one; otherwise fall back to the raw key.
+                    dest = mc.get_contact_by_key_prefix(pubkey) or pubkey
+                    epoch = int(time.time())
+                    result = await mc.commands.send_cmd(dest, f"time {epoch}")
+                    if result.type == EventType.ERROR:
+                        detail = f"set-time failed: {result.payload}"
+                        _LOGGER.error("Time sync: %s for %s", detail, label)
+                        time_sync_status["results"].append(
+                            {"name": label, "ok": False, "detail": detail}
+                        )
+                    else:
+                        _LOGGER.info("Time sync: set %s clock to %d", label, epoch)
+                        time_sync_status["results"].append(
+                            {
+                                "name": label,
+                                "ok": True,
+                                "detail": f"clock set to {epoch}",
+                            }
+                        )
+
+                    await mc.commands.send_logout(pubkey)
+                except Exception as exc:
+                    _LOGGER.exception("Time sync: error syncing %s", label)
+                    time_sync_status["results"].append(
+                        {"name": label, "ok": False, "detail": str(exc)}
+                    )
+                # Let the mesh settle before the next device.
+                await asyncio.sleep(2)
+            _LOGGER.info("Time sync: done")
+        finally:
+            time_sync_status["running"] = False
+            time_sync_status["finished_at"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
 
     async def reply_worker():
         while True:
@@ -366,9 +495,30 @@ async def main():
                 "Time sync: next run at %s (in %.0f min)", TIME_SYNC_AT, delay / 60
             )
             await asyncio.sleep(delay)
-            reply_queue.put_nowait(("timesync",))
+            enqueue_time_sync("scheduled")
             # Guard against re-firing within the same minute after a short sleep.
             await asyncio.sleep(60)
+
+    async def handle_web_index(request):
+        return web.Response(
+            text=render_status_html(time_sync_status, bool(TIME_SYNC_DEVICES)),
+            content_type="text/html",
+        )
+
+    async def handle_web_status(request):
+        return web.json_response(time_sync_status)
+
+    async def handle_web_trigger(request):
+        if not TIME_SYNC_DEVICES:
+            return web.json_response(
+                {"ok": False, "error": "No time_sync_devices configured."},
+                status=400,
+            )
+        if not enqueue_time_sync("manual"):
+            return web.json_response(
+                {"ok": False, "error": "A sync is already running."}, status=409
+            )
+        return web.json_response({"ok": True})
 
     async def handle_rx_log(event):
         global latest_dm_path, latest_dm_hash_size, latest_dm_hops
@@ -480,6 +630,21 @@ async def main():
 
     worker_task = asyncio.create_task(reply_worker())
 
+    # Ingress-only web UI (see config.yaml: ingress/ingress_port, no `ports:`
+    # mapping) with a manual "Sync Now" button. Started unconditionally since
+    # the ingress panel is always registered, regardless of whether the daily
+    # schedule is enabled — the manual trigger is also how you'd test the
+    # feature before turning the schedule on.
+    web_app = web.Application()
+    web_app.router.add_get("/", handle_web_index)
+    web_app.router.add_get("/status", handle_web_status)
+    web_app.router.add_post("/trigger", handle_web_trigger)
+    web_runner = web.AppRunner(web_app)
+    await web_runner.setup()
+    web_site = web.TCPSite(web_runner, "0.0.0.0", WEB_PORT)
+    await web_site.start()
+    _LOGGER.info("Time sync web UI listening on port %d", WEB_PORT)
+
     scheduler_task = None
     if TIME_SYNC_ENABLED and TIME_SYNC_DEVICES:
         scheduler_task = asyncio.create_task(time_sync_scheduler())
@@ -510,6 +675,7 @@ async def main():
         worker_task.cancel()
         if scheduler_task is not None:
             scheduler_task.cancel()
+        await web_runner.cleanup()
         await mc.stop_auto_message_fetching()
         await mc.disconnect()
         _LOGGER.info("Disconnected")

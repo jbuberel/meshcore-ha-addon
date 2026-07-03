@@ -11,9 +11,15 @@ auto-replies to channel and direct messages.
   daily remote time-sync: at `time_sync_at` it logs in to each configured
   repeater/room-server (`time_sync_devices`) and sends the firmware CLI
   `time <epoch>` to set its clock to the host's time. The sync runs *on the
-  single reply worker* (enqueued as a `("timesync",)` job), not from its own
-  task, so admin commands stay serialized with message replies — the same
-  one-coroutine-owns-the-link rule as everything else (see Lessons learned).
+  single reply worker* (enqueued via `enqueue_time_sync()` as a `("timesync",)`
+  job), not from its own task, so admin commands stay serialized with message
+  replies — the same one-coroutine-owns-the-link rule as everything else (see
+  Lessons learned). An `aiohttp` server (started in `main()`, routes in
+  `handle_web_*`) exposes this over HA ingress (`ingress`/`ingress_port` in
+  `config.yaml`, no `ports:` mapping) as a sidebar panel with a manual
+  "Sync Now" button — same `enqueue_time_sync()` path, so it can't race the
+  scheduler. No `panel_admin` flag, so it's intentionally usable by any HA
+  dashboard user, not just admins.
 - `meshcore_test_bot/config.yaml` — HA add-on manifest. **`version:` here drives
   releases** (see Releasing).
 - `meshcore_test_bot/run.sh` — bashio entrypoint; exports each `config.yaml`
