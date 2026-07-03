@@ -33,17 +33,25 @@ TIME_SYNC_AT = os.environ.get("TIME_SYNC_AT", "03:30").strip()
 
 
 def _parse_time_sync_devices() -> list[dict]:
+    """Parse TIME_SYNC_DEVICES, which bashio::config emits as one compact JSON
+    object per line for a list-of-objects option (not a single JSON array)."""
     raw = os.environ.get("TIME_SYNC_DEVICES", "").strip()
     if not raw:
         return []
-    try:
-        devices = json.loads(raw)
-    except json.JSONDecodeError:
-        _LOGGER.error("TIME_SYNC_DEVICES is not valid JSON; ignoring: %r", raw)
-        return []
-    if not isinstance(devices, list):
-        _LOGGER.error("TIME_SYNC_DEVICES is not a list; ignoring")
-        return []
+    devices: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            _LOGGER.error("TIME_SYNC_DEVICES has an invalid entry; skipping: %r", line)
+            continue
+        if isinstance(entry, list):
+            devices.extend(entry)
+        else:
+            devices.append(entry)
     return devices
 
 
