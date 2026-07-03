@@ -188,6 +188,40 @@ async def wait_for_login_outcome(mc: MeshCore, timeout: float) -> tuple[bool, st
     return False, f"no response within {timeout:.1f}s (device unreachable or busy)"
 
 
+# Plain-English gloss for the device error codes we can actually act on.
+# meshcore's reader already resolves a numeric error_code to this code_string
+# (e.g. a companion-radio ERROR frame becomes {"error_code": 2, "code_string":
+# "ERR_CODE_NOT_FOUND"}); we only need to translate the string, not the code.
+_FRIENDLY_DEVICE_ERRORS = {
+    "ERR_CODE_NOT_FOUND": "not a known contact on this companion radio",
+    "ERR_CODE_TABLE_FULL": "companion radio's contact table is full",
+    "ERR_CODE_BAD_STATE": "companion radio rejected the command (bad state)",
+    "ERR_CODE_UNSUPPORTED_CMD": "companion radio does not support this command",
+    "ERR_CODE_ILLEGAL_ARG": "companion radio rejected the command (illegal argument)",
+    "ERR_CODE_FILE_IO_ERROR": "companion radio file I/O error",
+}
+
+
+def describe_error(payload: dict | None) -> str:
+    """Render a command-error Event payload as a short, readable string.
+
+    Device-originated errors carry a ``code_string`` (see above); client-side
+    synthesized errors — a local send timeout, no response at all — carry
+    ``reason`` instead (e.g. {"reason": "timeout"}), which is already
+    readable as-is.
+    """
+    payload = payload or {}
+    code_string = payload.get("code_string")
+    if code_string:
+        friendly = _FRIENDLY_DEVICE_ERRORS.get(code_string)
+        return f"{code_string} ({friendly})" if friendly else code_string
+    if "reason" in payload:
+        return payload["reason"]
+    if "error" in payload:
+        return str(payload["error"])
+    return str(payload)
+
+
 def render_status_html(status: dict, devices_configured: bool) -> str:
     """Render the ingress "Sync Now" page. Vanilla HTML/JS, no build step or
     external assets, so it works regardless of the ingress path prefix HA
@@ -382,6 +416,14 @@ async def main():
             _LOGGER.info(
                 "Time sync: starting for %d device(s)", len(TIME_SYNC_DEVICES)
             )
+
+            # The contact list was loaded once at startup and is otherwise
+            # only marked dirty (never refetched) when an advertisement or
+            # path update comes in — see meshcore's _contact_change handler.
+            # Force a refresh here so a device that started advertising after
+            # the bot booted isn't permanently invisible to this daily job.
+            await mc.ensure_contacts(follow=True)
+
             for dev in TIME_SYNC_DEVICES:
                 pubkey = (dev.get("pubkey") or "").strip()
                 password = dev.get("password") or ""
@@ -394,16 +436,36 @@ async def main():
                         {"name": label, "ok": False, "detail": "missing 'pubkey'"}
                     )
                     continue
+
+                # Login requires the full public key, and the companion radio
+                # rejects it with ERR_CODE_NOT_FOUND if the key isn't in its own
+                # contact/routing table — it never even reaches the mesh. Check
+                # this ourselves first so a misconfigured or not-yet-advertised
+                # device gets an immediate, specific message instead of paying
+                # for a login round trip only to get the same answer back.
+                contact = mc.get_contact_by_key_prefix(pubkey)
+                if contact is None:
+                    detail = (
+                        "not a known contact on this companion radio — it may "
+                        "not have advertised yet, or the configured pubkey is "
+                        "wrong"
+                    )
+                    _LOGGER.error("Time sync: %s for %s", detail, label)
+                    time_sync_status["results"].append(
+                        {"name": label, "ok": False, "detail": detail}
+                    )
+                    continue
+
                 try:
-                    # Login requires the full 32-byte public key. We drive the
-                    # handshake ourselves (rather than send_login_sync) because
-                    # that helper only waits for LOGIN_SUCCESS: a wrong password
-                    # (which the firmware answers with LOGIN_FAILED) and an
-                    # unreachable device both just look like a timeout. Racing
-                    # both event types lets us log which one actually happened.
+                    # We drive the login handshake ourselves (rather than
+                    # send_login_sync) because that helper only waits for
+                    # LOGIN_SUCCESS: a wrong password (which the firmware
+                    # answers with LOGIN_FAILED) and an unreachable device both
+                    # just look like a timeout. Racing both event types lets us
+                    # log which one actually happened.
                     sent = await mc.commands.send_login(pubkey, password)
                     if sent.type == EventType.ERROR:
-                        detail = f"could not send login request ({sent.payload})"
+                        detail = f"could not send login request: {describe_error(sent.payload)}"
                         _LOGGER.error(
                             "Time sync: login failed for %s: %s", label, detail
                         )
@@ -427,13 +489,10 @@ async def main():
                         )
                         continue
 
-                    # Address the command via the known contact (uses its routing
-                    # path) when we have one; otherwise fall back to the raw key.
-                    dest = mc.get_contact_by_key_prefix(pubkey) or pubkey
                     epoch = int(time.time())
-                    result = await mc.commands.send_cmd(dest, f"time {epoch}")
+                    result = await mc.commands.send_cmd(contact, f"time {epoch}")
                     if result.type == EventType.ERROR:
-                        detail = f"set-time failed: {result.payload}"
+                        detail = f"set-time failed: {describe_error(result.payload)}"
                         _LOGGER.error("Time sync: %s for %s", detail, label)
                         time_sync_status["results"].append(
                             {"name": label, "ok": False, "detail": detail}

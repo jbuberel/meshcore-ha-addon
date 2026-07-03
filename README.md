@@ -121,7 +121,13 @@ time_sync_devices:
 
 **Finding a device's public key:** in the MeshCore app, open the repeater or
 room-server contact and copy its full public key. The device must already be a
-known contact on the bot's node so the sync command can be routed to it.
+known contact on the bot's companion radio so the sync command can be routed
+to it — the add-on checks this itself before attempting a login, and logs
+`not a known contact on this companion radio` (rather than trying and getting
+a slower, less clear failure back from the device) if it isn't. If you see
+that, either the device hasn't advertised to this companion radio yet, or the
+configured `pubkey` doesn't match its actual key (e.g. it was copied before a
+reflash, which generates a new key).
 
 > The sync shares the same single command channel as the message auto-replies,
 > so admin commands and replies never overlap on the serial link. A sync of

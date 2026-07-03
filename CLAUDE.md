@@ -19,7 +19,16 @@ auto-replies to channel and direct messages.
   `config.yaml`, no `ports:` mapping) as a sidebar panel with a manual
   "Sync Now" button — same `enqueue_time_sync()` path, so it can't race the
   scheduler. No `panel_admin` flag, so it's intentionally usable by any HA
-  dashboard user, not just admins.
+  dashboard user, not just admins. Before logging in to each device,
+  `run_time_sync()` checks `mc.get_contact_by_key_prefix()` itself and skips
+  with a specific message if the pubkey isn't a known contact — the companion
+  radio would otherwise reject the login with `ERR_CODE_NOT_FOUND` anyway,
+  since the login command never reaches the mesh if the local contact/routing
+  table doesn't have that key. It also calls `mc.ensure_contacts(follow=True)`
+  at the start of every run, since meshcore only marks the contact cache dirty
+  on a new advertisement/path update — it never auto-refetches — so without
+  this a device that starts advertising after the bot boots would otherwise
+  stay invisible until a restart.
 - `meshcore_test_bot/config.yaml` — HA add-on manifest. **`version:` here drives
   releases** (see Releasing).
 - `meshcore_test_bot/run.sh` — bashio entrypoint; exports each `config.yaml`
