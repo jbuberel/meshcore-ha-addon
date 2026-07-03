@@ -150,6 +150,38 @@ def seconds_until(hhmm: str) -> float:
     return (target - now).total_seconds()
 
 
+async def wait_for_login_outcome(mc: MeshCore, timeout: float) -> tuple[bool, str]:
+    """Wait for the remote login handshake to resolve, returning (ok, reason).
+
+    meshcore's own ``send_login_sync`` only waits for ``LOGIN_SUCCESS``, so a
+    wrong password — which the firmware answers with an explicit
+    ``LOGIN_FAILED`` — is indistinguishable from an unreachable device; both
+    just time out to ``None``. We race both event types so a failed sync can
+    actually be diagnosed (bad password vs. no response at all).
+    """
+    success_wait = asyncio.ensure_future(
+        mc.dispatcher.wait_for_event(EventType.LOGIN_SUCCESS, timeout=timeout)
+    )
+    failed_wait = asyncio.ensure_future(
+        mc.dispatcher.wait_for_event(EventType.LOGIN_FAILED, timeout=timeout)
+    )
+    try:
+        await asyncio.wait(
+            {success_wait, failed_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        for pending in (success_wait, failed_wait):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(success_wait, failed_wait, return_exceptions=True)
+
+    if not success_wait.cancelled() and success_wait.result() is not None:
+        return True, ""
+    if not failed_wait.cancelled() and failed_wait.result() is not None:
+        return False, "device rejected the password (LOGIN_FAILED)"
+    return False, f"no response within {timeout:.1f}s (device unreachable or busy)"
+
+
 async def resolve_channel_index(mc: MeshCore, name: str) -> int | None:
     """Find the index of the channel named ``name`` by querying the device.
 
@@ -257,10 +289,30 @@ async def main():
                 _LOGGER.error("Time sync: device entry missing 'pubkey'; skipping")
                 continue
             try:
-                # Login requires the full 32-byte public key.
-                login = await mc.commands.send_login_sync(pubkey, password)
-                if login is None or login.type == EventType.ERROR:
-                    _LOGGER.error("Time sync: login failed for %s", label)
+                # Login requires the full 32-byte public key. We drive the
+                # handshake ourselves (rather than send_login_sync) because
+                # that helper only waits for LOGIN_SUCCESS: a wrong password
+                # (which the firmware answers with LOGIN_FAILED) and an
+                # unreachable device both just look like a timeout. Racing
+                # both event types lets us log which one actually happened.
+                sent = await mc.commands.send_login(pubkey, password)
+                if sent.type == EventType.ERROR:
+                    _LOGGER.error(
+                        "Time sync: login failed for %s: could not send "
+                        "login request (%s)",
+                        label,
+                        sent.payload,
+                    )
+                    continue
+
+                suggested_timeout = (sent.payload or {}).get(
+                    "suggested_timeout", 4000
+                )
+                ok, reason = await wait_for_login_outcome(
+                    mc, suggested_timeout / 800
+                )
+                if not ok:
+                    _LOGGER.error("Time sync: login failed for %s: %s", label, reason)
                     continue
 
                 # Address the command via the known contact (uses its routing
