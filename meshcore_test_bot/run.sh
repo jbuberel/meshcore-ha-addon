@@ -36,7 +36,9 @@ else
     # Log the raw Supervisor answer so the add-on log shows *why* discovery
     # failed (e.g. "Service not enabled" = no add-on has registered as the
     # mqtt provider, which only the official Mosquitto add-on does).
-    bashio::log.warning "Supervisor /services/mqtt said: $(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" http://supervisor/services/mqtt)"
+    # ${VAR:-} guard: bashio scripts run with nounset, and SUPERVISOR_TOKEN
+    # only exists when config.yaml requests API access (hassio_api).
+    bashio::log.warning "Supervisor /services/mqtt said: $(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN:-}" http://supervisor/services/mqtt)"
     bashio::log.warning "Auto-discovery only finds the official Mosquitto broker add-on; for any other broker, set the mqtt_host/mqtt_port/mqtt_user/mqtt_password options"
 fi
 

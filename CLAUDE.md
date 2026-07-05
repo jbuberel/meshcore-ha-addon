@@ -24,8 +24,13 @@ auto-replies to channel and direct messages.
   (`mqtt_button_task()` — the Zigbee2MQTT-Restart-button pattern): `run.sh`
   exports `MQTT_*` env vars from the `mqtt_host`/`mqtt_port`/`mqtt_user`/
   `mqtt_password` options when set, otherwise from the Supervisor services
-  API (`services: mqtt:want` in `config.yaml`; `want` keeps the broker
-  optional). The manual options exist because the services API is *only*
+  API (`services: mqtt:want` **plus** `hassio_api: true` in `config.yaml` —
+  `services` only grants the endpoint; without `hassio_api` the Supervisor
+  never injects the `SUPERVISOR_TOKEN` env var, so every bashio API call
+  silently fails and discovery always reports no broker. Also, bashio runs
+  with nounset, so any direct `${SUPERVISOR_TOKEN}` reference needs a `:-`
+  default. `want` keeps the broker optional). The manual options exist
+  because the services API is *only*
   populated by the official Mosquitto add-on — an external or containerized
   broker is invisible to it, so `bashio::services.available "mqtt"` returns
   false even when MQTT is otherwise fully working (the run.sh else-branch

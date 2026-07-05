@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.6.0"
+version: "1.6.1"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -70,6 +70,10 @@ map:
 # Ask the Supervisor for MQTT broker credentials (e.g. the Mosquitto add-on).
 # `want` (not `need`) keeps this optional: without a broker the add-on still
 # runs, it just skips publishing the "Sync Now" dashboard button entity.
+# BOTH keys are required: `services` grants access to the /services/mqtt
+# endpoint, but only `hassio_api` makes the Supervisor inject the
+# SUPERVISOR_TOKEN env var that bashio needs to call it at all.
+hassio_api: true
 services:
   - mqtt:want
 
