@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.4.1"
+version: "1.5.0"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -54,6 +54,12 @@ devices:
 
 map:
   - config:rw
+
+# Ask the Supervisor for MQTT broker credentials (e.g. the Mosquitto add-on).
+# `want` (not `need`) keeps this optional: without a broker the add-on still
+# runs, it just skips publishing the "Sync Now" dashboard button entity.
+services:
+  - mqtt:want
 
 # Ingress-only web UI (sidebar panel) with a "Sync Now" button for the time
 # sync feature. No `panel_admin` flag is set, so it's visible and usable to

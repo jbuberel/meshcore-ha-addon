@@ -19,8 +19,20 @@ auto-replies to channel and direct messages.
   `config.yaml`, no `ports:` mapping) as a sidebar panel with a manual
   "Sync Now" button — same `enqueue_time_sync()` path, so it can't race the
   scheduler. No `panel_admin` flag, so it's intentionally usable by any HA
-  dashboard user, not just admins. Before logging in to each device,
-  `run_time_sync()` checks `mc.get_contact_by_key_prefix()` itself and skips
+  dashboard user, not just admins. The same trigger is also exposed as an HA
+  `button` entity (`button.meshcore_test_bot_sync_now`) via MQTT discovery
+  (`mqtt_button_task()` — the Zigbee2MQTT-Restart-button pattern): broker
+  credentials come from the Supervisor services API (`services: mqtt:want` in
+  `config.yaml`, exported by `run.sh` as `MQTT_*` env vars; `want` keeps the
+  broker optional), a retained config on `homeassistant/button/.../config`
+  creates the entity, and a press publishes to a command topic whose handler
+  only calls `enqueue_time_sync()` — never the device. With no broker the
+  task isn't started; with a broker but no `time_sync_devices` it clears the
+  retained discovery topic so no dead button lingers on dashboards. `aiomqtt`
+  and its `paho-mqtt` dependency ship pure-Python wheels, so the Dockerfile
+  needed no new apt packages for the arm builds (unlike pycryptodome).
+  Before logging in to each device, `run_time_sync()` checks
+  `mc.get_contact_by_key_prefix()` itself and skips
   with a specific message if the pubkey isn't a known contact — the companion
   radio would otherwise reject the login with `ERR_CODE_NOT_FOUND` anyway,
   since the login command never reaches the mesh if the local contact/routing

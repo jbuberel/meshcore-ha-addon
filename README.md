@@ -133,9 +133,25 @@ reflash, which generates a new key).
 > so admin commands and replies never overlap on the serial link. A sync of
 > several devices takes a few seconds; replies simply queue behind it.
 
-### Manual trigger
+### Dashboard button (MQTT)
 
-The add-on has its own entry in the Home Assistant sidebar (an *ingress*
+If you have an MQTT broker set up (the official **Mosquitto broker** add-on
+plus the MQTT integration — if Zigbee2MQTT works, you already do), the add-on
+automatically publishes a **Sync Now** `button` entity via MQTT discovery, the
+same way Zigbee2MQTT provides its *Restart* button. It appears under a
+**MeshCore Test Bot** device in **Settings → Devices & Services → MQTT**, and
+you can add it to any dashboard as a button/tile card or use it in
+automations (`button.press` on `button.meshcore_test_bot_sync_now`).
+
+There is nothing to configure: the add-on gets the broker credentials from
+the Supervisor automatically. Without a broker (or with no
+`time_sync_devices` configured) the entity simply isn't published. The button
+shows *unavailable* while the add-on is stopped. Pressing it while a sync is
+already running is a no-op, same as the panel button below.
+
+### Manual trigger (sidebar panel)
+
+The add-on also has its own entry in the Home Assistant sidebar (an *ingress*
 panel) with a **Sync Now** button that runs the same sync immediately,
 independent of the daily schedule — handy for testing your `time_sync_devices`
 config or re-running after fixing a password, without waiting for
@@ -168,14 +184,20 @@ To find your device's stable path in HA, go to **Settings → System → Hardwar
 
 ### Prerequisites
 - Python 3.11+
-- [`meshcore_py`](https://github.com/meshcore-dev/meshcore_py)
+- The Python dependencies in [`meshcore_test_bot/requirements.txt`](meshcore_test_bot/requirements.txt)
+  ([`meshcore`](https://github.com/meshcore-dev/meshcore_py), `aiohttp`, `aiomqtt`)
 
 ### Running locally
 
 ```bash
-pip install meshcore_py
+pip install -r meshcore_test_bot/requirements.txt
 SERIAL_PORT=/dev/ttyUSB0 CHANNEL_IDX=1 TRIGGER_TEXT=test python3 meshcore_test_bot/bot.py
 ```
+
+Inside Home Assistant, `run.sh` fills in the MQTT broker credentials from the
+Supervisor. For a local run, leave `MQTT_HOST` unset to skip the MQTT button
+entirely, or point it at a broker yourself (`MQTT_HOST`, `MQTT_PORT`,
+`MQTT_USER`, `MQTT_PASSWORD`).
 
 ### Building the Docker image locally
 

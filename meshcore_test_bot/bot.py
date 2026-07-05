@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
+import aiomqtt
 from aiohttp import web
 from meshcore import MeshCore, EventType
 
@@ -36,6 +38,22 @@ TIME_SYNC_AT = os.environ.get("TIME_SYNC_AT", "03:30").strip()
 # so this is reachable only via HA's authenticated ingress proxy, never
 # directly on the LAN.
 WEB_PORT = 8099
+
+# MQTT broker credentials, exported by run.sh from the Supervisor services API
+# when a broker add-on (e.g. Mosquitto) is installed. Empty MQTT_HOST means no
+# broker — the dashboard button entity is simply not published.
+MQTT_HOST = os.environ.get("MQTT_HOST", "").strip()
+MQTT_PORT = int(os.environ.get("MQTT_PORT") or "1883")
+MQTT_USER = os.environ.get("MQTT_USER") or None
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
+
+# Topics for the "Sync Now" button entity, created via MQTT discovery (the
+# same mechanism Zigbee2MQTT uses for its Restart button): a retained config
+# on the discovery topic makes HA create a `button` entity that can be placed
+# on any dashboard; pressing it publishes to the command topic.
+MQTT_AVAILABILITY_TOPIC = "meshcore_test_bot/availability"
+MQTT_COMMAND_TOPIC = "meshcore_test_bot/sync_now/press"
+MQTT_DISCOVERY_TOPIC = "homeassistant/button/meshcore_test_bot/sync_now/config"
 
 
 def _parse_time_sync_devices() -> list[dict]:
@@ -558,6 +576,86 @@ async def main():
             # Guard against re-firing within the same minute after a short sleep.
             await asyncio.sleep(60)
 
+    async def mqtt_button_task():
+        """Expose the manual sync trigger as a HA ``button`` entity over MQTT.
+
+        Publishes a retained discovery config so Home Assistant auto-creates
+        the entity (no user YAML), marks it available, and listens on the
+        command topic. A press only calls enqueue_time_sync() — the actual
+        device I/O still happens on the reply worker, so a dashboard press
+        can't race the scheduler, the web UI, or message replies.
+
+        Runs as its own reconnect loop: broker restarts (e.g. Mosquitto
+        add-on updates) just cause a logged retry, never affect the bot.
+        """
+        discovery_payload = json.dumps(
+            {
+                "name": "Sync Now",
+                "unique_id": "meshcore_test_bot_sync_now",
+                "command_topic": MQTT_COMMAND_TOPIC,
+                "payload_press": "PRESS",
+                "availability_topic": MQTT_AVAILABILITY_TOPIC,
+                "icon": "mdi:clock-check-outline",
+                "device": {
+                    "identifiers": ["meshcore_test_bot"],
+                    "name": "MeshCore Test Bot",
+                    "manufacturer": "meshcore-ha-addon",
+                },
+            }
+        )
+        while True:
+            try:
+                async with aiomqtt.Client(
+                    MQTT_HOST,
+                    port=MQTT_PORT,
+                    username=MQTT_USER,
+                    password=MQTT_PASSWORD,
+                    # Last-will marks the button unavailable if the add-on
+                    # dies without a clean disconnect (crash, SIGKILL).
+                    will=aiomqtt.Will(
+                        MQTT_AVAILABILITY_TOPIC, "offline", retain=True
+                    ),
+                ) as client:
+                    if not TIME_SYNC_DEVICES:
+                        # Clear a retained discovery config left over from a
+                        # previous config that did have devices, so no dead
+                        # button lingers on dashboards, then bow out.
+                        await client.publish(MQTT_DISCOVERY_TOPIC, "", retain=True)
+                        _LOGGER.info(
+                            "MQTT: no time_sync_devices configured; "
+                            "'Sync Now' button not published"
+                        )
+                        return
+                    await client.publish(
+                        MQTT_DISCOVERY_TOPIC, discovery_payload, retain=True
+                    )
+                    await client.publish(
+                        MQTT_AVAILABILITY_TOPIC, "online", retain=True
+                    )
+                    await client.subscribe(MQTT_COMMAND_TOPIC)
+                    _LOGGER.info(
+                        "MQTT: 'Sync Now' button published (command topic %s)",
+                        MQTT_COMMAND_TOPIC,
+                    )
+                    try:
+                        async for _message in client.messages:
+                            _LOGGER.info("MQTT: 'Sync Now' button pressed")
+                            enqueue_time_sync("MQTT button")
+                    except asyncio.CancelledError:
+                        # Graceful shutdown: the last-will only fires on an
+                        # unclean disconnect, so mark the button unavailable
+                        # ourselves before the clean disconnect below.
+                        with contextlib.suppress(Exception):
+                            await client.publish(
+                                MQTT_AVAILABILITY_TOPIC, "offline", retain=True
+                            )
+                        raise
+            except aiomqtt.MqttError as exc:
+                _LOGGER.warning(
+                    "MQTT: connection failed (%s); retrying in 30s", exc
+                )
+                await asyncio.sleep(30)
+
     async def handle_web_index(request):
         return web.Response(
             text=render_status_html(time_sync_status, bool(TIME_SYNC_DEVICES)),
@@ -704,6 +802,12 @@ async def main():
     await web_site.start()
     _LOGGER.info("Time sync web UI listening on port %d", WEB_PORT)
 
+    mqtt_task = None
+    if MQTT_HOST:
+        mqtt_task = asyncio.create_task(mqtt_button_task())
+    else:
+        _LOGGER.info("MQTT: no broker configured; 'Sync Now' dashboard button disabled")
+
     scheduler_task = None
     if TIME_SYNC_ENABLED and TIME_SYNC_DEVICES:
         scheduler_task = asyncio.create_task(time_sync_scheduler())
@@ -734,6 +838,11 @@ async def main():
         worker_task.cancel()
         if scheduler_task is not None:
             scheduler_task.cancel()
+        if mqtt_task is not None:
+            # Await it so the availability "offline" publish (see
+            # mqtt_button_task's CancelledError handler) actually completes.
+            mqtt_task.cancel()
+            await asyncio.gather(mqtt_task, return_exceptions=True)
         await web_runner.cleanup()
         await mc.stop_auto_message_fetching()
         await mc.disconnect()
