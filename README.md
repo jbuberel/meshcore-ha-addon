@@ -169,6 +169,20 @@ How the add-on finds the broker:
   `mqtt_password` options. When `mqtt_host` is set, it always wins over
   auto-discovery.
 
+**Where do MQTT credentials come from?** The auto-discovered credentials are
+generated internally by the Mosquitto add-on — there is nothing to look up.
+If you need to fill in `mqtt_user`/`mqtt_password` manually, the Mosquitto
+add-on accepts either of these:
+
+- any **Home Assistant user account** — the common approach is a dedicated,
+  non-administrator user (e.g. `mqtt-bot`) created under **Settings → People
+  → Users**, so MQTT access isn't tied to a person's login;
+- a broker-local account defined in the Mosquitto add-on's **Configuration**
+  tab under `logins:` (a list of `username`/`password` pairs).
+
+For the Mosquitto add-on, `mqtt_host` is `core-mosquitto`; for external
+brokers use their hostname/IP and whatever accounts that broker defines.
+
 If neither is available (or no `time_sync_devices` are configured) the
 entity simply isn't published; the add-on log explains what was tried. The
 button shows *unavailable* while the add-on is stopped. Pressing it while a
