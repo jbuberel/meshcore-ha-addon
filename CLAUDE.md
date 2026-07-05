@@ -21,10 +21,16 @@ auto-replies to channel and direct messages.
   scheduler. No `panel_admin` flag, so it's intentionally usable by any HA
   dashboard user, not just admins. The same trigger is also exposed as an HA
   `button` entity (`button.meshcore_test_bot_sync_now`) via MQTT discovery
-  (`mqtt_button_task()` — the Zigbee2MQTT-Restart-button pattern): broker
-  credentials come from the Supervisor services API (`services: mqtt:want` in
-  `config.yaml`, exported by `run.sh` as `MQTT_*` env vars; `want` keeps the
-  broker optional), a retained config on `homeassistant/button/.../config`
+  (`mqtt_button_task()` — the Zigbee2MQTT-Restart-button pattern): `run.sh`
+  exports `MQTT_*` env vars from the `mqtt_host`/`mqtt_port`/`mqtt_user`/
+  `mqtt_password` options when set, otherwise from the Supervisor services
+  API (`services: mqtt:want` in `config.yaml`; `want` keeps the broker
+  optional). The manual options exist because the services API is *only*
+  populated by the official Mosquitto add-on — an external or containerized
+  broker is invisible to it, so `bashio::services.available "mqtt"` returns
+  false even when MQTT is otherwise fully working (the run.sh else-branch
+  logs the raw `/services/mqtt` response for diagnosis). A retained config on
+  `homeassistant/button/.../config`
   creates the entity, and a press publishes to a command topic whose handler
   only calls `enqueue_time_sync()` — never the device. With no broker the
   task isn't started; with a broker but no `time_sync_devices` it clears the
@@ -40,7 +46,16 @@ auto-replies to channel and direct messages.
   at the start of every run, since meshcore only marks the contact cache dirty
   on a new advertisement/path update — it never auto-refetches — so without
   this a device that starts advertising after the bot boots would otherwise
-  stay invisible until a restart.
+  stay invisible until a restart. Replies to firmware CLI commands arrive as
+  ordinary `CONTACT_MSG_RECV` events with `txt_type == TXT_TYPE_CLI_DATA` (1);
+  `send_cli_and_wait_reply()` matches them by pubkey prefix + txt_type, and
+  `handle_contact_message` ignores them so they're never treated as DMs. The
+  reported clock skew comes from the reply's `sender_timestamp` (the device's
+  own clock when it sent the reply, second resolution) — *not* from parsing
+  the "clock" reply text, which is only minute-resolution. Sync success is
+  judged by the device's reply to `time <epoch>` ("OK - clock set: …"), not
+  by MSG_SENT; the firmware refuses to set a clock backwards ("(ERR: clock
+  cannot go backwards)"), so a device running ahead is reported as refused.
 - `meshcore_test_bot/config.yaml` — HA add-on manifest. **`version:` here drives
   releases** (see Releasing).
 - `meshcore_test_bot/run.sh` — bashio entrypoint; exports each `config.yaml`

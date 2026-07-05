@@ -1,6 +1,6 @@
 name: "MeshCore Test Bot"
 description: "Monitors a MeshCore device for messages on a channel and sends auto-replies."
-version: "1.5.0"
+version: "1.6.0"
 slug: "meshcore_test_bot"
 url: "https://github.com/jbuberel/meshcore-ha-addon"
 
@@ -27,6 +27,10 @@ options:
   time_sync_enabled: false
   time_sync_at: "03:30"
   time_sync_devices: []
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
 
 schema:
   serial_port: str
@@ -42,6 +46,14 @@ schema:
     - pubkey: str
       password: password
       name: str?
+  # Manual MQTT broker settings for the "Sync Now" dashboard button. Only
+  # needed when the broker is NOT the official Mosquitto add-on (Supervisor
+  # auto-discovery via `services: mqtt:want` below only covers that one).
+  # When mqtt_host is set, these take precedence over auto-discovery.
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_user: str
+  mqtt_password: password
 
 # uart: true auto-discovers serial/UART devices and grants the container the
 # correct cgroup device permissions (fixes "Operation not permitted" / EPERM).

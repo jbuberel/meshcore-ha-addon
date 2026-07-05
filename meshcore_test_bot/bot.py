@@ -94,6 +94,11 @@ DEFAULT_MAX_CHANNELS = 32
 PAYLOAD_TYPE_TEXT_MSG = 2  # direct (1:1) text message
 PAYLOAD_TYPE_GRP_TXT = 5  # channel / group text message
 
+# txt_type of a CONTACT_MSG_RECV event (firmware TxtDataHelpers.h). Replies to
+# firmware CLI commands (e.g. "clock", "time <epoch>") arrive as contact
+# messages with TXT_TYPE_CLI_DATA, not as their own event type.
+TXT_TYPE_CLI_DATA = 1
+
 # The decoded CONTACT_MSG_RECV / CHANNEL_MSG_RECV events do not carry the path
 # the packet travelled, so we capture it from the RX_LOG_DATA event that the
 # firmware emits immediately before each decoded message. We keep the direct
@@ -204,6 +209,37 @@ async def wait_for_login_outcome(mc: MeshCore, timeout: float) -> tuple[bool, st
     if not failed_wait.cancelled() and failed_wait.result() is not None:
         return False, "device rejected the password (LOGIN_FAILED)"
     return False, f"no response within {timeout:.1f}s (device unreachable or busy)"
+
+
+async def send_cli_and_wait_reply(
+    mc: MeshCore, contact, pubkey: str, cmd: str
+) -> tuple[dict | None, str]:
+    """Send a firmware CLI command to a logged-in device and await its reply.
+
+    Returns (reply_payload, error): exactly one is meaningful. The reply is
+    the CONTACT_MSG_RECV payload of the device's CLI answer, matched on the
+    sender's pubkey prefix and TXT_TYPE_CLI_DATA. Its ``sender_timestamp`` is
+    the device's own clock (epoch seconds) at the moment it sent the reply,
+    which is what makes clock-skew measurement possible without parsing the
+    reply text (the "clock" command's text is only minute-resolution).
+    """
+    sent = await mc.commands.send_cmd(contact, cmd)
+    if sent.type == EventType.ERROR:
+        return None, f"could not send '{cmd}': {describe_error(sent.payload)}"
+    # Same margin the login flow uses: suggested_timeout is in ms, /800
+    # converts to seconds with 1.25x headroom for the reply leg.
+    timeout = ((sent.payload or {}).get("suggested_timeout") or 4000) / 800
+    reply = await mc.dispatcher.wait_for_event(
+        EventType.CONTACT_MSG_RECV,
+        attribute_filters={
+            "pubkey_prefix": pubkey[:12].lower(),
+            "txt_type": TXT_TYPE_CLI_DATA,
+        },
+        timeout=timeout,
+    )
+    if reply is None:
+        return None, f"no reply to '{cmd}' within {timeout:.1f}s"
+    return reply.payload or {}, ""
 
 
 # Plain-English gloss for the device error codes we can actually act on.
@@ -507,23 +543,64 @@ async def main():
                         )
                         continue
 
-                    epoch = int(time.time())
-                    result = await mc.commands.send_cmd(contact, f"time {epoch}")
-                    if result.type == EventType.ERROR:
-                        detail = f"set-time failed: {describe_error(result.payload)}"
-                        _LOGGER.error("Time sync: %s for %s", detail, label)
-                        time_sync_status["results"].append(
-                            {"name": label, "ok": False, "detail": detail}
+                    # Measure the device's clock skew before correcting it:
+                    # ask "clock" and read the reply's sender_timestamp (the
+                    # device's clock when it sent the reply). Positive skew =
+                    # device ahead of the host; accuracy is within the mesh
+                    # transit time of the reply. Skew being unknown doesn't
+                    # abort the sync — we still set the time.
+                    skew = None
+                    clock_reply, err = await send_cli_and_wait_reply(
+                        mc, contact, pubkey, "clock"
+                    )
+                    if clock_reply is not None:
+                        skew = clock_reply.get("sender_timestamp", 0) - int(
+                            time.time()
                         )
                     else:
-                        _LOGGER.info("Time sync: set %s clock to %d", label, epoch)
-                        time_sync_status["results"].append(
-                            {
-                                "name": label,
-                                "ok": True,
-                                "detail": f"clock set to {epoch}",
-                            }
+                        _LOGGER.warning(
+                            "Time sync: %s: %s; skew unknown", label, err
                         )
+                    skew_str = f"{skew:+d} seconds" if skew is not None else "unknown"
+
+                    epoch = int(time.time())
+                    set_time_str = datetime.fromtimestamp(epoch).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    set_reply, err = await send_cli_and_wait_reply(
+                        mc, contact, pubkey, f"time {epoch}"
+                    )
+                    if set_reply is None:
+                        # The command may have been applied even though the
+                        # confirmation never made it back over the mesh.
+                        ok = False
+                        detail = (
+                            f"{err} — clock may or may not have been set "
+                            f"(skew was {skew_str})"
+                        )
+                    else:
+                        reply_text = set_reply.get("text", "")
+                        if reply_text.startswith("OK"):
+                            # "OK - clock set: HH:MM - D/M/YYYY UTC"
+                            ok = True
+                            detail = f"Skew: {skew_str}, set time: {set_time_str}"
+                        elif "ERR" in reply_text:
+                            # "(ERR: clock cannot go backwards)" — the
+                            # firmware refuses to set the clock earlier than
+                            # its current time, i.e. the device runs ahead.
+                            ok = False
+                            detail = f"device refused: {reply_text} (skew was {skew_str})"
+                        else:
+                            ok = False
+                            detail = (
+                                f"unexpected reply: {reply_text!r} "
+                                f"(skew was {skew_str})"
+                            )
+                    log = _LOGGER.info if ok else _LOGGER.error
+                    log("Time sync: %s: %s", label, detail)
+                    time_sync_status["results"].append(
+                        {"name": label, "ok": ok, "detail": detail}
+                    )
 
                     await mc.commands.send_logout(pubkey)
                 except Exception as exc:
@@ -752,6 +829,13 @@ async def main():
 
     async def handle_contact_message(event):
         msg = event.payload or {}
+
+        # CLI replies (e.g. to the time-sync "clock"/"time" commands) arrive
+        # as contact messages too; they're consumed by run_time_sync's
+        # wait_for_event and are not conversation, so don't log or reply.
+        if msg.get("txt_type") == TXT_TYPE_CLI_DATA:
+            return
+
         text = (msg.get("text") or "").strip()
         pubkey_prefix = msg.get("pubkey_prefix", "")
 

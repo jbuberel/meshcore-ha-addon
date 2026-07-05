@@ -50,6 +50,10 @@ where each `Pn` is the one-byte public-key prefix (uppercase hex) of a repeater 
 | `time_sync_enabled` | `false` | Enable the daily remote clock sync (see [Remote time sync](#remote-time-sync)). |
 | `time_sync_at` | `03:30` | Local time (24-hour `HH:MM`) at which the daily sync runs. |
 | `time_sync_devices` | *(empty list)* | Repeaters/room-servers to sync. Each entry has a `pubkey`, `password`, and optional `name`. |
+| `mqtt_host` | *(empty)* | MQTT broker host for the dashboard button (see [Dashboard button](#dashboard-button-mqtt)). Leave empty to auto-discover the official Mosquitto add-on; set it only for any other broker. |
+| `mqtt_port` | `1883` | MQTT broker port, used only when `mqtt_host` is set. |
+| `mqtt_user` | *(empty)* | MQTT username, used only when `mqtt_host` is set. Leave empty for anonymous. |
+| `mqtt_password` | *(empty)* | MQTT password, used only when `mqtt_host` is set. |
 
 Example `options` in the add-on UI:
 
@@ -95,12 +99,24 @@ day at `time_sync_at` (your HA server's local time) it connects to each device
 in `time_sync_devices`, one at a time, and sets its clock to the Home Assistant
 host's current time.
 
-For each device it logs in with the admin password, issues the firmware CLI
-command [`time <epoch>`](https://docs.meshcore.io/cli_commands/#set-the-time-to-a-specific-timestamp),
+For each device it logs in with the admin password, measures the device's
+clock skew, issues the firmware CLI command
+[`time <epoch>`](https://docs.meshcore.io/cli_commands/#set-the-time-to-a-specific-timestamp),
 and logs out. The time pushed is UTC epoch seconds, so it is correct regardless
 of your server's timezone. Devices are synced sequentially with a short pause
 between each. If a device can't be reached or the login fails, the error is
 logged and the add-on moves on to the next one.
+
+A successful sync reports the skew and the time that was set, e.g.
+`Skew: -42 seconds, set time: 2026-07-05 12:32:48` (negative skew = the
+device's clock was behind your HA server; the time shown is your server's
+local time). Success means the device *confirmed* the change — the add-on
+waits for the firmware's reply rather than assuming a sent command worked.
+One quirk to know about: the firmware refuses to move a clock **backwards**,
+so a device running *ahead* reports
+`device refused: (ERR: clock cannot go backwards)`. Such a device will come
+back into sync naturally once its clock is no longer ahead (or after a
+restart resets its clock).
 
 Each entry in `time_sync_devices` has:
 
@@ -135,19 +151,28 @@ reflash, which generates a new key).
 
 ### Dashboard button (MQTT)
 
-If you have an MQTT broker set up (the official **Mosquitto broker** add-on
-plus the MQTT integration — if Zigbee2MQTT works, you already do), the add-on
-automatically publishes a **Sync Now** `button` entity via MQTT discovery, the
-same way Zigbee2MQTT provides its *Restart* button. It appears under a
-**MeshCore Test Bot** device in **Settings → Devices & Services → MQTT**, and
-you can add it to any dashboard as a button/tile card or use it in
-automations (`button.press` on `button.meshcore_test_bot_sync_now`).
+If you have an MQTT broker set up (plus the MQTT integration in Home
+Assistant), the add-on publishes a **Sync Now** `button` entity via MQTT
+discovery, the same way Zigbee2MQTT provides its *Restart* button. It appears
+under a **MeshCore Test Bot** device in **Settings → Devices & Services →
+MQTT**, and you can add it to any dashboard as a button/tile card or use it
+in automations (`button.press` on `button.meshcore_test_bot_sync_now`).
 
-There is nothing to configure: the add-on gets the broker credentials from
-the Supervisor automatically. Without a broker (or with no
-`time_sync_devices` configured) the entity simply isn't published. The button
-shows *unavailable* while the add-on is stopped. Pressing it while a sync is
-already running is a no-op, same as the panel button below.
+How the add-on finds the broker:
+
+- **Official [Mosquitto broker](https://github.com/home-assistant/addons/tree/master/mosquitto)
+  add-on:** nothing to configure — the add-on gets the host and credentials
+  from the Supervisor automatically. Only this add-on registers itself with
+  the Supervisor's MQTT service registry, so auto-discovery finds *only* it.
+- **Any other broker** (external Mosquitto, a broker in a plain Docker
+  container, etc.): set the `mqtt_host` / `mqtt_port` / `mqtt_user` /
+  `mqtt_password` options. When `mqtt_host` is set, it always wins over
+  auto-discovery.
+
+If neither is available (or no `time_sync_devices` are configured) the
+entity simply isn't published; the add-on log explains what was tried. The
+button shows *unavailable* while the add-on is stopped. Pressing it while a
+sync is already running is a no-op, same as the panel button below.
 
 ### Manual trigger (sidebar panel)
 
