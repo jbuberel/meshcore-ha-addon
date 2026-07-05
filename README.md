@@ -2,6 +2,12 @@
 
 A Home Assistant add-on that monitors a [MeshCore](https://meshcore.co.nz) device over USB serial and auto-replies to a few simple commands.
 
+**Features:**
+
+- **Auto-replies** to a trigger word on a monitored channel, reporting hop count and device name.
+- **[Path commands](#path-commands)** that report the route a message travelled through the mesh, hop by hop, via channel or DM.
+- **[Remote time sync](#remote-time-sync)** — a daily scheduled clock sync that logs in to your repeaters and room-servers and sets their clocks from the Home Assistant host's time, with skew measurement and confirmed results. Can also be triggered on demand from a [sidebar panel](#manual-trigger-sidebar-panel) or a [dashboard button entity](#dashboard-button-mqtt) (MQTT).
+
 When it sees a channel message containing the trigger text (default: `"test"`), it replies with:
 
 ```
