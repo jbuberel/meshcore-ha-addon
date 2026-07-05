@@ -91,7 +91,10 @@ Releases are **fully automated from `config.yaml`** — there is no manual
 
 1. Bump `version:` in `meshcore_test_bot/config.yaml` (semver: patch for fixes,
    minor for features) and push to `main` / merge a PR. You **must** bump it —
-   HA only pulls a new image when the version changes.
+   HA only pulls a new image when the version changes. Add a matching entry to
+   `meshcore_test_bot/CHANGELOG.md` (newest first) — the Supervisor serves that
+   file from its clone of this repo as the "Changelog" in the add-on UI; it is
+   not part of the Docker image and needs no version bump of its own to show.
 2. The `build` job builds and pushes multi-arch images to GHCR.
 3. The `release` ("Tag and Release") job reads that version and, if no matching
    `vX.Y.Z` tag exists yet, uses `softprops/action-gh-release` to create **both**
