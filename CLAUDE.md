@@ -62,8 +62,15 @@ auto-replies to channel and direct messages.
   own clock when it sent the reply, second resolution) — *not* from parsing
   the "clock" reply text, which is only minute-resolution. Sync success is
   judged by the device's reply to `time <epoch>` ("OK - clock set: …"), not
-  by MSG_SENT; the firmware refuses to set a clock backwards ("(ERR: clock
-  cannot go backwards)"), so a device running ahead is reported as refused.
+  by MSG_SENT. The firmware's `time` handler (CommonCLI.cpp, shared by
+  repeaters and room servers) requires the pushed epoch to be strictly
+  greater than the device clock *at arrival* — clocks only move forward
+  (protects timestamp-based replay protection/ordering) — and mesh transit
+  makes the pushed epoch stale on arrival, so an already-accurate device
+  *always* answers "(ERR: clock cannot go backwards)". That refusal is
+  classified by measured skew: within ±`TIME_SYNC_IN_SYNC_TOLERANCE` (10 s)
+  it's reported OK as "already in sync"; far ahead is a real failure that
+  remote sync can never fix.
   CLI replies are sent once, unacknowledged — when the `time` confirmation
   is lost, `run_time_sync()` re-queries "clock" and accepts a residual skew
   ≤ 30 s as verified success. The meshcore library's "please consider using

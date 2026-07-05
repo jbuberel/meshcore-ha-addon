@@ -118,10 +118,15 @@ confirmations travel the mesh unacknowledged, so if one is lost the add-on
 re-queries the device's clock and still reports success when the clock
 verifiably matches (marked `confirmation lost; verified via clock query`).
 One quirk to know about: the firmware refuses to move a clock **backwards**,
-so a device running *ahead* reports
-`device refused: (ERR: clock cannot go backwards)`. Such a device will come
-back into sync naturally once its clock is no longer ahead (or after a
-restart resets its clock).
+and the epoch the add-on pushes is always slightly stale by the time it
+crosses the mesh — so a device whose clock is *already accurate* refuses the
+set every time. The add-on recognizes this: a refusal with the measured skew
+within ±10 seconds is reported as **OK** with
+`already in sync (firmware only moves clocks forward; skew was -1 seconds)`.
+A device genuinely running far *ahead* reports FAILED with
+`device clock is ahead … cannot be corrected remotely` — remote sync can
+never fix that; it comes right again naturally once real time catches up, or
+when the device restarts and resets its clock.
 
 Each entry in `time_sync_devices` has:
 

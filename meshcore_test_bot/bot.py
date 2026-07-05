@@ -115,6 +115,14 @@ PAYLOAD_TYPE_GRP_TXT = 5  # channel / group text message
 # messages with TXT_TYPE_CLI_DATA, not as their own event type.
 TXT_TYPE_CLI_DATA = 1
 
+# Window (seconds) within which a device's clock counts as "already in sync".
+# The firmware only ever moves a clock forward (`time` requires secs > curr,
+# checked on arrival), and the epoch we push is stale by the mesh transit
+# time when it gets there — so a device that's already accurate ALWAYS
+# refuses with "clock cannot go backwards". A refusal with measured skew
+# inside this window is therefore the best possible outcome, not a failure.
+TIME_SYNC_IN_SYNC_TOLERANCE = 10
+
 # The decoded CONTACT_MSG_RECV / CHANNEL_MSG_RECV events do not carry the path
 # the packet travelled, so we capture it from the RX_LOG_DATA event that the
 # firmware emits immediately before each decoded message. We keep the direct
@@ -650,10 +658,42 @@ async def main():
                             # "OK - clock set: HH:MM - D/M/YYYY UTC"
                             ok = True
                             detail = f"Skew: {skew_str}, set time: {set_time_str}"
+                        elif "cannot go backwards" in reply_text:
+                            # The firmware's monotonic guard (CommonCLI.cpp):
+                            # `time` only succeeds when the pushed epoch is
+                            # still in the device's future on arrival, so an
+                            # already-accurate device always refuses. Judge
+                            # the outcome by the measured skew instead.
+                            if (
+                                skew is not None
+                                and abs(skew) < TIME_SYNC_IN_SYNC_TOLERANCE
+                            ):
+                                ok = True
+                                detail = (
+                                    "already in sync (firmware only moves "
+                                    f"clocks forward; skew was {skew_str})"
+                                )
+                            elif (
+                                skew is not None
+                                and skew >= TIME_SYNC_IN_SYNC_TOLERANCE
+                            ):
+                                ok = False
+                                detail = (
+                                    "device clock is ahead and the firmware "
+                                    "only moves clocks forward, so it cannot "
+                                    "be corrected remotely (skew was "
+                                    f"{skew_str})"
+                                )
+                            else:
+                                # Skew unknown, or (contradictorily) the
+                                # device looked behind yet still refused —
+                                # report the raw refusal.
+                                ok = False
+                                detail = (
+                                    f"device refused: {reply_text} "
+                                    f"(skew was {skew_str})"
+                                )
                         elif "ERR" in reply_text:
-                            # "(ERR: clock cannot go backwards)" — the
-                            # firmware refuses to set the clock earlier than
-                            # its current time, i.e. the device runs ahead.
                             ok = False
                             detail = f"device refused: {reply_text} (skew was {skew_str})"
                         else:
