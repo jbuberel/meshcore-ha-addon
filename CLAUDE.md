@@ -95,6 +95,9 @@ Releases are **fully automated from `config.yaml`** — there is no manual
    `meshcore_test_bot/CHANGELOG.md` (newest first) — the Supervisor serves that
    file from its clone of this repo as the "Changelog" in the add-on UI; it is
    not part of the Docker image and needs no version bump of its own to show.
+   `meshcore_test_bot/DOCS.md` (the HA "Documentation" tab, same serve-from-repo
+   mechanism) mirrors the user-facing README sections — when a change touches
+   docs, update README.md and DOCS.md together.
 2. The `build` job builds and pushes multi-arch images to GHCR.
 3. The `release` ("Tag and Release") job reads that version and, if no matching
    `vX.Y.Z` tag exists yet, uses `softprops/action-gh-release` to create **both**
