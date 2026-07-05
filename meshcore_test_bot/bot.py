@@ -18,6 +18,22 @@ logging.basicConfig(
 )
 _LOGGER = logging.getLogger("meshcore_test_bot")
 
+
+class _DropLoginNag(logging.Filter):
+    """Drop meshcore's "please consider using send_login_sync" warning.
+
+    We use send_login deliberately: send_login_sync only waits for
+    LOGIN_SUCCESS, which makes a wrong password indistinguishable from an
+    unreachable device (see wait_for_login_outcome). The library's nag would
+    otherwise appear on every sync run and read like a problem.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "send_login_sync" not in record.getMessage()
+
+
+logging.getLogger("meshcore").addFilter(_DropLoginNag())
+
 SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
 BAUDRATE = int(os.environ.get("BAUDRATE", "115200"))
 CHANNEL_IDX = int(os.environ.get("CHANNEL_IDX", "1"))
@@ -162,6 +178,31 @@ def format_path(path_hex: str, hash_size: int = 1) -> str:
         for i in range(0, len(path_hex), chars_per_hop)
     ]
     return " → ".join(hops)
+
+
+def format_skew(skew: int | None) -> str:
+    """Render measured clock skew for humans.
+
+    Always shows signed seconds (positive = device ahead of the host); once
+    the magnitude stops being readable as seconds, appends an approximation
+    in a larger unit — a repeater that sat powered off for months reads
+    "-67514026 seconds (~781 days behind)" instead of a bare number.
+    """
+    if skew is None:
+        return "unknown"
+    text = f"{skew:+d} seconds"
+    magnitude = abs(skew)
+    if magnitude >= 172800:
+        approx = f"~{magnitude / 86400:.0f} days"
+    elif magnitude >= 7200:
+        approx = f"~{magnitude / 3600:.0f} hours"
+    elif magnitude >= 120:
+        approx = f"~{magnitude / 60:.0f} minutes"
+    else:
+        approx = ""
+    if approx:
+        text += f" ({approx} {'ahead' if skew > 0 else 'behind'})"
+    return text
 
 
 def seconds_until(hhmm: str) -> float:
@@ -561,7 +602,7 @@ async def main():
                         _LOGGER.warning(
                             "Time sync: %s: %s; skew unknown", label, err
                         )
-                    skew_str = f"{skew:+d} seconds" if skew is not None else "unknown"
+                    skew_str = format_skew(skew)
 
                     epoch = int(time.time())
                     set_time_str = datetime.fromtimestamp(epoch).strftime(
@@ -571,13 +612,38 @@ async def main():
                         mc, contact, pubkey, f"time {epoch}"
                     )
                     if set_reply is None:
-                        # The command may have been applied even though the
-                        # confirmation never made it back over the mesh.
-                        ok = False
-                        detail = (
-                            f"{err} — clock may or may not have been set "
-                            f"(skew was {skew_str})"
+                        # CLI replies are sent once, unacknowledged, so the
+                        # confirmation can get lost in the mesh even though
+                        # the command itself was applied. Before declaring
+                        # the outcome unknown, ask "clock" again: a residual
+                        # skew near zero proves the clock is now right.
+                        verify_reply, _ = await send_cli_and_wait_reply(
+                            mc, contact, pubkey, "clock"
                         )
+                        residual = (
+                            verify_reply.get("sender_timestamp", 0)
+                            - int(time.time())
+                            if verify_reply is not None
+                            else None
+                        )
+                        if residual is not None and abs(residual) <= 30:
+                            ok = True
+                            detail = (
+                                f"Skew: {skew_str}, set time: {set_time_str} "
+                                "(confirmation lost; verified via clock query)"
+                            )
+                        elif residual is not None:
+                            ok = False
+                            detail = (
+                                f"{err}; follow-up clock query shows the "
+                                f"clock is still off by {format_skew(residual)}"
+                            )
+                        else:
+                            ok = False
+                            detail = (
+                                f"{err} — clock may or may not have been set "
+                                f"(skew was {skew_str})"
+                            )
                     else:
                         reply_text = set_reply.get("text", "")
                         if reply_text.startswith("OK"):

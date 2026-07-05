@@ -110,8 +110,13 @@ logged and the add-on moves on to the next one.
 A successful sync reports the skew and the time that was set, e.g.
 `Skew: -42 seconds, set time: 2026-07-05 12:32:48` (negative skew = the
 device's clock was behind your HA server; the time shown is your server's
-local time). Success means the device *confirmed* the change — the add-on
-waits for the firmware's reply rather than assuming a sent command worked.
+local time; skews too large to read in seconds get an approximation, e.g.
+`(~781 days behind)` for a repeater that reverted to its firmware-build
+date). Success means the device *confirmed* the change — the add-on waits
+for the firmware's reply rather than assuming a sent command worked. CLI
+confirmations travel the mesh unacknowledged, so if one is lost the add-on
+re-queries the device's clock and still reports success when the clock
+verifiably matches (marked `confirmation lost; verified via clock query`).
 One quirk to know about: the firmware refuses to move a clock **backwards**,
 so a device running *ahead* reports
 `device refused: (ERR: clock cannot go backwards)`. Such a device will come

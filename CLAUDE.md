@@ -64,6 +64,12 @@ auto-replies to channel and direct messages.
   judged by the device's reply to `time <epoch>` ("OK - clock set: …"), not
   by MSG_SENT; the firmware refuses to set a clock backwards ("(ERR: clock
   cannot go backwards)"), so a device running ahead is reported as refused.
+  CLI replies are sent once, unacknowledged — when the `time` confirmation
+  is lost, `run_time_sync()` re-queries "clock" and accepts a residual skew
+  ≤ 30 s as verified success. The meshcore library's "please consider using
+  send_login_sync" warning is intentionally filtered out (`_DropLoginNag`):
+  we drive login manually precisely because the sync helper can't
+  distinguish LOGIN_FAILED from an unreachable device.
 - `meshcore_test_bot/config.yaml` — HA add-on manifest. **`version:` here drives
   releases** (see Releasing).
 - `meshcore_test_bot/run.sh` — bashio entrypoint; exports each `config.yaml`
