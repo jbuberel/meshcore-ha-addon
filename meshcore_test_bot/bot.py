@@ -12,9 +12,12 @@ import aiomqtt
 from aiohttp import web
 from meshcore import MeshCore, EventType
 
+# force=True: meshcore's __init__ calls basicConfig() at import time, which
+# would otherwise make this call a no-op and drop the timestamps.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True,
 )
 _LOGGER = logging.getLogger("meshcore_test_bot")
 

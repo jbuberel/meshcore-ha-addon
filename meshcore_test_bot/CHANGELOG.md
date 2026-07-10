@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.5
+
+- Log lines now include timestamps. The timestamped format was already
+  configured, but the meshcore library's own import-time `basicConfig()` call
+  was silently overriding it, leaving Python's bare default format.
+
 ## 1.6.4
 
 - Treat the firmware's "clock cannot go backwards" refusal as success when the
