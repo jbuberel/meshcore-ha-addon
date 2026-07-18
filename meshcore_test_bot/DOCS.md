@@ -40,6 +40,7 @@ repeater in the path. A directly received message (zero hops) shows
 | `test` (the `dm_trigger_text`) | **Direct message** to the device | A **direct message** reply with the DM's path |
 | `!path` | On the monitored channel (e.g. `#test`) | A **channel** reply with the message's path |
 | `!dm` | On the monitored channel (e.g. `#test`) | A **direct message** to the sender with the message's path |
+| `!help` | On the monitored channel, or as a **direct message** | A reply (same channel, or via DM) with a one-line summary of these commands |
 
 > The path is read from the device's RX log for the most recently received
 > message of the matching type (direct vs. channel). The `!dm` command

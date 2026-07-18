@@ -29,6 +29,7 @@ where each `Pn` is the one-byte public-key prefix (uppercase hex) of a repeater 
 | `test` (the `dm_trigger_text`) | **Direct message** to the device | A **direct message** reply with the DM's path |
 | `!path` | On the monitored channel (e.g. `#test`) | A **channel** reply with the message's path |
 | `!dm` | On the monitored channel (e.g. `#test`) | A **direct message** to the sender with the message's path |
+| `!help` | On the monitored channel, or as a **direct message** | A reply (same channel, or via DM) with a one-line summary of these commands |
 
 > The path is read from the device's RX log for the most recently received message of the matching type (direct vs. channel), since the decoded message events do not themselves carry the path. The `!dm` command resolves the sender's display name to a contact in order to address the reply, so the sender must be a known contact on the device.
 

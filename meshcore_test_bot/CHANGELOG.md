@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.0
+
+- New `!help` command: send it on the monitored channel or as a direct
+  message and the bot replies with a one-line summary of its commands
+  (trigger word, `!path`, `!dm`, `!help`, and the DM path trigger).
+
 ## 1.6.5
 
 - Log lines now include timestamps. The timestamped format was already

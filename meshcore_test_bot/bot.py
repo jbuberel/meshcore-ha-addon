@@ -101,9 +101,21 @@ def _parse_time_sync_devices() -> list[dict]:
 TIME_SYNC_DEVICES = _parse_time_sync_devices()
 
 # Channel commands. "!path" replies on the channel with the message path;
-# "!dm" replies to the sender via a direct message with the same path.
+# "!dm" replies to the sender via a direct message with the same path;
+# "!help" (channel or DM) replies with a one-line command summary.
 CMD_PATH = "!path"
 CMD_DM = "!dm"
+CMD_HELP = "!help"
+
+
+def help_text() -> str:
+    """One-line summary of the bot's commands, short enough for a single
+    mesh message."""
+    return (
+        f"cmds: '{TRIGGER_TEXT}' hops reply, {CMD_PATH} msg path, "
+        f"{CMD_DM} path via DM, {CMD_HELP} this help. "
+        f"DM '{DM_TRIGGER_TEXT}' for the DM's path"
+    )
 
 # Fallback upper bound for the channel scan when the firmware does not report
 # max_channels in its device info.
@@ -927,6 +939,11 @@ async def main():
             reply_queue.put_nowait(("dm", contact, reply))
             return
 
+        # "!help" — reply on the channel with a summary of the commands.
+        if body_lower == CMD_HELP:
+            reply_queue.put_nowait(("chan", channel_idx, help_text()))
+            return
+
         # Only respond when the message body starts with the trigger text
         # (case-insensitive). Matching the body — not the full "sender: text"
         # string — avoids false replies from sender names or mid-message hits.
@@ -956,6 +973,12 @@ async def main():
             return
 
         _LOGGER.info("DM from %s: %s", pubkey_prefix, text)
+
+        # "!help" — reply via DM with a summary of the commands.
+        if text.lower() == CMD_HELP:
+            dest = mc.get_contact_by_key_prefix(pubkey_prefix) or pubkey_prefix
+            reply_queue.put_nowait(("dm", dest, help_text()))
+            return
 
         # Reply with the path only for the configured DM trigger text.
         if text.lower() != DM_TRIGGER_TEXT:
@@ -1013,12 +1036,13 @@ async def main():
         _LOGGER.warning("Time sync enabled but no devices configured; skipping")
 
     _LOGGER.info(
-        "Listening on channel %d for '%s'; channel commands '%s'/'%s'; "
+        "Listening on channel %d for '%s'; channel commands '%s'/'%s'/'%s'; "
         "DM trigger '%s'",
         channel_idx,
         TRIGGER_TEXT,
         CMD_PATH,
         CMD_DM,
+        CMD_HELP,
         DM_TRIGGER_TEXT,
     )
 
